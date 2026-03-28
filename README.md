@@ -12,6 +12,8 @@
 
 云服务器若 **IPv6 不通**（`curl -6` 失败），下载默认启用 **仅 IPv4**（等同 `yt-dlp --force-ipv4`，环境变量 `YTDLP_FORCE_IPV4` 默认为 `1`）。若必须走 IPv6，设置 `YTDLP_FORCE_IPV4=0`。
 
+若视频流仍 **HTTP 403**：脚本默认 `YTDLP_YOUTUBE_PLAYER_CLIENT=android`（可多客户端：`android,web`）；并请在服务器放置 **youtube_cookies.txt**（从本机浏览器导出 Netscape cookies 后上传）。仍失败则执行 `yt-dlp -U` 升级。
+
 ## 安装
 
 ```bash

@@ -19,6 +19,7 @@
 - 若链接含 &list=（播放列表），脚本已默认 noplaylist，只处理当前 watch?v= 视频；也可手动改成仅 https://www.youtube.com/watch?v=视频ID 。
 - 若使用 cookies 后出现「Requested format is not available」：cookie 已生效，但带登录态时需通过 YouTube 验证，本机须安装 Deno/Node 等（见 https://github.com/yt-dlp/yt-dlp/wiki/EJS ）。脚本会先带 cookie 下载，失败则自动去掉 cookie 重试。可选环境变量：YTDLP_DENO_PATH / YTDLP_NODE_PATH 指向 deno.exe、node.exe（未加入 PATH 时）。
 - 云服务器常见 IPv6 不通导致连接失败：默认启用 yt-dlp 的 force_ipv4（等同 --force-ipv4）。若需走 IPv6，设置环境变量 YTDLP_FORCE_IPV4=0。
+- 机房 IP 易出现视频流 403：默认使用 extractor 参数 `player_client=android`（可用环境变量 `YTDLP_YOUTUBE_PLAYER_CLIENT` 覆盖，逗号分隔，如 `android,web`；设为 `none` 则不用）。仍 403 时请在服务器放置 **youtube_cookies.txt**（浏览器导出 Netscape）。
 """
 
 from __future__ import annotations
@@ -53,6 +54,17 @@ def _find_project_root_youtube_cookies() -> Path | None:
         if p.is_file():
             return p
     return None
+
+
+def _youtube_extractor_args() -> dict | None:
+    """缓解 YouTube 对数据中心 IP 的 403 / SABR；默认 android 客户端。环境变量 YTDLP_YOUTUBE_PLAYER_CLIENT=none 关闭。"""
+    raw = (os.environ.get("YTDLP_YOUTUBE_PLAYER_CLIENT") or "android").strip().lower()
+    if raw in ("none", "off", "0", "false", "no"):
+        return None
+    clients = [x.strip() for x in raw.replace(";", ",").split(",") if x.strip()]
+    if not clients:
+        return None
+    return {"youtube": {"player_client": clients}}
 
 
 def _js_runtimes_from_env() -> dict | None:
@@ -153,6 +165,11 @@ def download_youtube(
     }
     if (os.environ.get("YTDLP_FORCE_IPV4", "1").strip().lower() not in ("0", "false", "no")):
         base_opts["force_ipv4"] = True
+    ex_args = _youtube_extractor_args()
+    if ex_args:
+        base_opts["extractor_args"] = ex_args
+        pc = ex_args.get("youtube", {}).get("player_client", [])
+        print(f"  YouTube player_client: {pc}（可用 YTDLP_YOUTUBE_PLAYER_CLIENT 覆盖，none=关闭）")
     js_rt = _js_runtimes_from_env()
     if js_rt:
         base_opts["js_runtimes"] = js_rt
