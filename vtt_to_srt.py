@@ -4,6 +4,8 @@
 不指定输出时，生成同名的 .srt 文件。
 """
 
+from __future__ import annotations
+
 import re
 import sys
 from pathlib import Path

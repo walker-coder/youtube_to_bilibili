@@ -7,6 +7,8 @@
 需要已安装 ffmpeg 并加入 PATH。
 """
 
+from __future__ import annotations
+
 import subprocess
 import sys
 from pathlib import Path

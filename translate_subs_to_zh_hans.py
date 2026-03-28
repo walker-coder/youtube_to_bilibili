@@ -9,6 +9,8 @@
 - 填 GOOGLE_TRANSLATE_API_KEY：使用 Google 官方 API，批量更快、更稳定，按量计费。
 """
 
+from __future__ import annotations
+
 import json
 import os
 import re
