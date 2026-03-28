@@ -5,6 +5,7 @@
 #   ./run_youtube_to_bilibili_bg.sh JOU5iy56FjY
 #   ./run_youtube_to_bilibili_bg.sh JOU5iy56FjY --no-upload
 # 日志在 logs/ 目录；进程为 nohup 后台任务，断开 SSH 后仍继续跑。
+# 默认使用 python3.11；可通过环境变量 PYTHON 覆盖，例如：PYTHON=python3 ./run_youtube_to_bilibili_bg.sh ...
 
 set -euo pipefail
 
@@ -24,7 +25,7 @@ mkdir -p "$LOG_DIR"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 LOG="${LOG_DIR}/youtube_to_bilibili_${VID}_${STAMP}.log"
 
-PYTHON="${PYTHON:-python}"
+PYTHON="${PYTHON:-python3.11}"
 cd "$ROOT"
 
 nohup "$PYTHON" youtube_to_bilibili.py "$URL" "$@" >>"$LOG" 2>&1 &

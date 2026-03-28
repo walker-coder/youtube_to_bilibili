@@ -9,6 +9,7 @@
   python youtube_to_bilibili.py "URL" --no-upload   # 只生成本地双语视频，不上传
 
 说明：
+- 下载：**仅 1080p**（`height=1080` 的视频轨 + 音频，或单文件 1080p）。若当前环境下列不出 1080p 流，将报错退出，**不会**降级为 720p/360p。
 - 视频与字幕保存在 video_subs/，文件名以 yt_<视频ID> 为前缀。
 - 翻译默认使用免费引擎（deep-translator），长视频可能较慢；可配置 Google 翻译 API（见 translate_subs_to_zh_hans.py）。
 - 转载投稿须自行确保有权使用素材，并遵守哔哩哔哩社区规范。
@@ -38,6 +39,9 @@ from paths_config import PROJECT_ROOT, VIDEO_SUBS_DIR, ensure_video_subs_dir
 from translate_subs_to_zh_hans import translate_vtt_to_zh_hans
 from upload_bilibili import upload_video_to_bilibili
 from vtt_to_srt import vtt_to_srt
+
+# 仅 1080p：DASH 合并（最佳 1080p 视频轨 + 最佳音频）或极少数单文件 1080p；无匹配则 yt-dlp 失败。
+YOUTUBE_FORMAT_1080P_ONLY = "bestvideo[height=1080]+bestaudio/best[height=1080]"
 
 # 浏览器扩展导出的 Netscape cookies，与 bilibili_cookie.env（B 站 KEY=value）不是同一种文件
 # 按顺序尝试：自定义名 → 扩展默认导出名（如 Get cookies.txt LOCALLY）
@@ -125,6 +129,21 @@ def _find_en_vtt(video_id: str) -> Path:
     )
 
 
+def _is_unavailable_format_error(e: BaseException) -> bool:
+    msg = str(e).lower()
+    return (
+        "requested format is not available" in msg
+        or "no video formats" in msg
+    )
+
+
+def _raise_no_1080_stream(err: BaseException) -> None:
+    raise RuntimeError(
+        "未找到 1080p 视频流，已按要求停止（不下载更低清晰度）。"
+        "请尝试：更新 yt-dlp、放置 youtube_cookies.txt、设置 YTDLP_YOUTUBE_PLAYER_CLIENT=android 等。"
+    ) from err
+
+
 def _youtube_upload_date_label(info: dict) -> str | None:
     """从 yt-dlp 信息解析上传日期，格式与 YouTube 页常见展示一致：M/D/YYYY（如 3/27/2026）。"""
     ud = (info.get("upload_date") or info.get("release_date") or "").strip()
@@ -150,8 +169,7 @@ def download_youtube(
     base_opts: dict = {
         # 链接里常带 &list=...，只下载当前视频，不展开整个播放列表
         "noplaylist": True,
-        # bv*+ba：更宽松的可合并音视频；再回退到原逻辑与单文件 best
-        "format": "bv*+ba/bestvideo+bestaudio/best[height<=1080]/best",
+        "format": YOUTUBE_FORMAT_1080P_ONLY,
         "merge_output_format": "mp4",
         "outtmpl": str(VIDEO_SUBS_DIR / "yt_%(id)s.%(ext)s"),
         "quiet": False,
@@ -194,17 +212,27 @@ def download_youtube(
             info = _extract(True)
         except DownloadError as e:
             msg = str(e)
-            if "Requested format is not available" in msg or "Only images are available" in msg:
+            if "Only images are available" in msg or _is_unavailable_format_error(e):
                 print(
                     "  提示：使用 cookies 时未能解析出可用视频流（常见于 YouTube 验证未通过、"
                     "本机未配置 JS 运行环境，见 https://github.com/yt-dlp/yt-dlp/wiki/EJS ）。"
                     "将不使用 cookies 重试下载…"
                 )
-                info = _extract(False)
+                try:
+                    info = _extract(False)
+                except DownloadError as e2:
+                    if _is_unavailable_format_error(e2):
+                        _raise_no_1080_stream(e2)
+                    raise
             else:
                 raise
     else:
-        info = _extract(False)
+        try:
+            info = _extract(False)
+        except DownloadError as e:
+            if _is_unavailable_format_error(e):
+                _raise_no_1080_stream(e)
+            raise
 
     if not info:
         raise RuntimeError("yt-dlp 未返回视频信息")

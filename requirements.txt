@@ -1,3 +1,5 @@
 yt-dlp>=2024.1.0
 deep-translator>=1.11.0
 bilibili-api-python>=16.0.0
+# bilibili-api 需要其一作为 HTTP 客户端；任选 httpx / aiohttp / curl_cffi
+httpx>=0.24.0
