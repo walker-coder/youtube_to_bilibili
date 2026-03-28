@@ -56,6 +56,20 @@ python youtube_to_bilibili.py "https://www.youtube.com/watch?v=..."
 - 若不需要上传后轮询审核与自动剪片：加 `--no-review-wait`。
 - 其它说明见 `youtube_to_bilibili.py` 文件头注释。
 
+### 后台运行（Linux / macOS / SSH）
+
+在服务器或本机终端里，只需传入 **YouTube 视频 ID**（`watch?v=` 后面一段），用 `nohup` 后台执行一键流水线，断开 SSH 后任务仍会继续。日志写入 **`logs/`**（目录已加入 `.gitignore`）。
+
+```bash
+chmod +x run_youtube_to_bilibili_bg.sh
+./run_youtube_to_bilibili_bg.sh JOU5iy56FjY
+# 等价于 python youtube_to_bilibili.py "https://www.youtube.com/watch?v=JOU5iy56FjY"
+
+./run_youtube_to_bilibili_bg.sh JOU5iy56FjY --no-upload
+```
+
+其余参数（如 `--title`、`--no-review-wait`）写在视频 ID 之后即可。若系统命令是 `python3`，可先执行 `export PYTHON=python3`。查看进度：`tail -f logs/youtube_to_bilibili_<视频ID>_*.log`（具体文件名以脚本输出为准）。
+
 ### 从中间步骤继续
 
 若下载已完成但后续步骤失败（例如翻译中断），可在 **`video_subs/`** 里文件齐全的前提下用 `resume_youtube_pipeline.py` 续跑，无需重下视频：
@@ -83,6 +97,7 @@ python resume_youtube_pipeline.py --from upload --vid 视频ID --url "..."
 | `bilingual_subs_to_video.py` | 将英/中字幕烧录进视频（流水线内部会调用） |
 | `translate_subs_to_zh_hans.py` / `vtt_to_srt.py` | 翻译与字幕格式转换 |
 | `resume_youtube_pipeline.py` | 从翻译/烧录/上传任一步继续，不重新下载（见上「从中间步骤继续」） |
+| `run_youtube_to_bilibili_bg.sh` | 仅传视频 ID，`nohup` 后台跑 `youtube_to_bilibili.py`，日志在 `logs/`（见上「后台运行」） |
 
 ## 审核轮询（可选环境变量）
 
