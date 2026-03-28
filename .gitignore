@@ -7,6 +7,9 @@ www.youtube.com_cookies.txt
 # 本地视频、字幕缓存目录，勿提交
 video_subs/
 
+# 后台脚本日志
+logs/
+
 # Python
 __pycache__/
 *.py[cod]
