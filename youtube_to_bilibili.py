@@ -14,6 +14,8 @@
 - 转载投稿须自行确保有权使用素材，并遵守哔哩哔哩社区规范。
 - YouTube 登录态：不要用 bilibili_cookie.env（那是 B 站 KEY=value）。将浏览器导出的 Netscape 文件放在项目根目录，命名为 youtube_cookies.txt 或扩展默认名 www.youtube.com_cookies（.txt 可无），或传 --cookies / 环境变量 YOUTUBE_COOKIES_FILE。
 - 若下载仍慢：先 yt-dlp -U；再配合 cookies 常能缓解限速。
+- B 站投稿标题：默认在开头附加 YouTube 上传日期（M/D/YYYY，与站点元数据 upload_date 一致），再接原标题或 --title。
+- 上传成功后会轮询创作中心审核：若「已退回」且稿件问题中含【HH:MM:SS-HH:MM:SS】，则剪除对应片段并替换稿件后结束（不再轮询）。可用 --no-review-wait 关闭。环境变量见 bilibili_review.py。
 - 若链接含 &list=（播放列表），脚本已默认 noplaylist，只处理当前 watch?v= 视频；也可手动改成仅 https://www.youtube.com/watch?v=视频ID 。
 - 若使用 cookies 后出现「Requested format is not available」：cookie 已生效，但带登录态时需通过 YouTube 验证，本机须安装 Deno/Node 等（见 https://github.com/yt-dlp/yt-dlp/wiki/EJS ）。脚本会先带 cookie 下载，失败则自动去掉 cookie 重试。可选环境变量：YTDLP_DENO_PATH / YTDLP_NODE_PATH 指向 deno.exe、node.exe（未加入 PATH 时）。
 """
@@ -24,6 +26,7 @@ import argparse
 import os
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import yt_dlp
@@ -109,13 +112,25 @@ def _find_en_vtt(video_id: str) -> Path:
     )
 
 
+def _youtube_upload_date_label(info: dict) -> str | None:
+    """从 yt-dlp 信息解析上传日期，格式与 YouTube 页常见展示一致：M/D/YYYY（如 3/27/2026）。"""
+    ud = (info.get("upload_date") or info.get("release_date") or "").strip()
+    if len(ud) == 8 and ud.isdigit():
+        try:
+            dt = datetime.strptime(ud, "%Y%m%d")
+            return f"{dt.month}/{dt.day}/{dt.year}"
+        except ValueError:
+            pass
+    return None
+
+
 def download_youtube(
     url: str,
     *,
     cookies_file: str | None = None,
     no_youtube_cookies: bool = False,
-) -> tuple[Path, Path, str, str]:
-    """返回 (视频路径, 英文字幕 vtt 路径, 视频 ID, YouTube 标题)。"""
+) -> tuple[Path, Path, str, str, str | None]:
+    """返回 (视频路径, 英文字幕 vtt 路径, 视频 ID, YouTube 标题, 上传日期标签或 None)。"""
     ensure_video_subs_dir()
     cookie_path = None if no_youtube_cookies else _resolve_youtube_cookiefile(cookies_file)
 
@@ -177,9 +192,10 @@ def download_youtube(
     if not vid:
         raise RuntimeError("无法解析视频 ID")
     title = (info.get("title") or "video").strip()
+    date_label = _youtube_upload_date_label(info)
     video_path = _resolve_downloaded_video(info, vid)
     en_vtt = _find_en_vtt(vid)
-    return video_path, en_vtt, vid, title
+    return video_path, en_vtt, vid, title, date_label
 
 
 def run_pipeline(
@@ -189,20 +205,28 @@ def run_pipeline(
     no_upload: bool,
     cookies_file: str | None = None,
     no_youtube_cookies: bool = False,
+    no_review_wait: bool = False,
 ) -> Path:
-    print("步骤 1/4：下载 YouTube 视频与英文字幕…")
-    video_path, en_vtt, vid, yt_title = download_youtube(
+    total_steps = (
+        5
+        if (not no_upload and not no_review_wait)
+        else (3 if no_upload else 4)
+    )
+    print(f"步骤 1/{total_steps}：下载 YouTube 视频与英文字幕…")
+    video_path, en_vtt, vid, yt_title, yt_date_label = download_youtube(
         url,
         cookies_file=cookies_file,
         no_youtube_cookies=no_youtube_cookies,
     )
     print(f"  视频: {video_path}")
+    if yt_date_label:
+        print(f"  上传日期: {yt_date_label}（将用于 B 站标题前缀）")
     print(f"  英文字幕: {en_vtt}")
 
-    print("步骤 2/4：翻译为简体中文（可能较久）…")
+    print(f"步骤 2/{total_steps}：翻译为简体中文（可能较久）…")
     zh_vtt = translate_vtt_to_zh_hans(en_vtt)
 
-    print("步骤 3/4：转为 SRT 并烧录双语画面字幕…")
+    print(f"步骤 3/{total_steps}：转为 SRT 并烧录双语画面字幕…")
     en_srt = vtt_to_srt(en_vtt)
     zh_srt = vtt_to_srt(zh_vtt)
     out_bilingual = VIDEO_SUBS_DIR / f"yt_{vid}_bilingual.mp4"
@@ -227,8 +251,14 @@ def run_pipeline(
         print("已跳过上传（--no-upload）。")
         return out_bilingual
 
-    print("步骤 4/4：上传哔哩哔哩…")
-    title = (bilibili_title or yt_title)[:80]
+    review_after = not no_review_wait
+    print(f"步骤 4/{total_steps}：上传哔哩哔哩…")
+    base_title = bilibili_title or yt_title
+    if yt_date_label:
+        title = f"{yt_date_label} {base_title}"
+    else:
+        title = base_title
+    title = title[:80]
     desc = (
         f"转载自 YouTube。\n原链接: {url}\n\n"
         "仅供个人学习交流，如有侵权请联系删除。"
@@ -241,6 +271,14 @@ def run_pipeline(
         source=f"YouTube: {url[:180]}",
     )
     print("投稿成功:", result)
+    if review_after:
+        bvid = result.get("bvid")
+        if not bvid:
+            raise RuntimeError("上传返回结果中缺少 bvid，无法轮询审核。")
+        print("步骤 5/5：轮询审核状态（退回则按时间轴剪片并替换稿件）…")
+        from bilibili_review import run_review_flow_sync
+
+        run_review_flow_sync(bvid, out_bilingual)
     return out_bilingual
 
 
@@ -269,6 +307,11 @@ def main() -> None:
         action="store_true",
         help="下载 YouTube 时不使用 cookies（忽略项目内 cookies 文件）",
     )
+    ap.add_argument(
+        "--no-review-wait",
+        action="store_true",
+        help="上传成功后不轮询审核、不自动按退回剪片替换",
+    )
     args = ap.parse_args()
     try:
         run_pipeline(
@@ -277,8 +320,9 @@ def main() -> None:
             no_upload=args.no_upload,
             cookies_file=args.cookies,
             no_youtube_cookies=args.no_youtube_cookies,
+            no_review_wait=args.no_review_wait,
         )
-    except (RuntimeError, FileNotFoundError, DownloadError) as e:
+    except (RuntimeError, FileNotFoundError, DownloadError, TimeoutError) as e:
         print(f"错误: {e}", file=sys.stderr)
         sys.exit(1)
 

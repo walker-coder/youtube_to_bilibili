@@ -11,7 +11,9 @@
 
 可选：
   BILIBILI_TID        分区 ID，默认 138（财经商业），见创作中心分区说明
-  BILIBILI_COVER      封面图片路径；不填则从视频首帧截取
+  BILIBILI_COVER      封面图片路径（仅当项目根目录不存在 bloomberg.jpg 时作为备选）
+
+封面：若项目根目录存在 **bloomberg.jpg**，投稿时固定使用该图；否则再尝试环境变量 BILIBILI_COVER，最后才从视频首帧截取。
 
 用法:
   pip install -r requirements.txt
@@ -37,6 +39,31 @@ from paths_config import VIDEO_SUBS_DIR, ensure_video_subs_dir
 
 # 默认分区：138 财经商业（可按需改环境变量 BILIBILI_TID）
 DEFAULT_TID = 138
+
+# 存在则优先作为投稿封面（与项目根目录 youtube_to_bilibili 同级）
+DEFAULT_COVER_NAME = "bloomberg.jpg"
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def _resolve_cover_path(video_path: Path) -> tuple[Path, bool]:
+    """返回 (封面路径, 是否为需删除的临时截图文件)。"""
+    fixed = _project_root() / DEFAULT_COVER_NAME
+    if fixed.is_file():
+        return fixed, False
+    env_cover = os.environ.get("BILIBILI_COVER", "").strip()
+    if env_cover:
+        p = Path(env_cover).resolve()
+        if not p.is_file():
+            raise FileNotFoundError(f"封面文件不存在: {p}")
+        return p, False
+    fd, tmp_name = tempfile.mkstemp(suffix=".jpg", prefix="bili_cover_")
+    os.close(fd)
+    tmp = Path(tmp_name)
+    _extract_cover_from_video(video_path, tmp)
+    return tmp, True
 
 
 def _load_local_env() -> None:
@@ -158,25 +185,14 @@ def upload_video_to_bilibili(
         "仅供个人学习交流，如有侵权请联系删除。"
     )
     tags = tags or ["YouTube"]
-    cover_path: Path | None = None
-    env_cover = os.environ.get("BILIBILI_COVER", "").strip()
-    if env_cover:
-        cover_path = Path(env_cover).resolve()
-        if not cover_path.is_file():
-            raise FileNotFoundError(f"封面文件不存在: {cover_path}")
-    else:
-        fd, tmp_name = tempfile.mkstemp(suffix=".jpg", prefix="bili_cover_")
-        os.close(fd)
-        tmp = Path(tmp_name)
-        _extract_cover_from_video(video_path, tmp)
-        cover_path = tmp
+    cover_path, cover_is_temp = _resolve_cover_path(video_path)
 
     try:
         return asyncio.run(
             _upload_async(video_path, title, desc, tags, cover_path, source=source)
         )
     finally:
-        if cover_path and "bili_cover_" in cover_path.name and cover_path.is_file():
+        if cover_is_temp and cover_path.is_file():
             try:
                 cover_path.unlink()
             except OSError:
@@ -208,27 +224,11 @@ def main() -> None:
     )
     tags = ["财经", "Bloomberg", "China"]
 
-    cover_path = None
-    env_cover = os.environ.get("BILIBILI_COVER", "").strip()
-    if env_cover:
-        cover_path = Path(env_cover).resolve()
-        if not cover_path.is_file():
-            print(f"封面文件不存在: {cover_path}")
-            sys.exit(1)
-    else:
-        fd, tmp_name = tempfile.mkstemp(suffix=".jpg", prefix="bili_cover_")
-        os.close(fd)
-        tmp = Path(tmp_name)
-        try:
-            _extract_cover_from_video(video_path, tmp)
-            cover_path = tmp
-        except Exception as e:
-            print(e)
-            try:
-                tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
-            sys.exit(1)
+    try:
+        cover_path, cover_is_temp = _resolve_cover_path(video_path)
+    except Exception as e:
+        print(e)
+        sys.exit(1)
 
     try:
         result = asyncio.run(
@@ -246,7 +246,7 @@ def main() -> None:
         print(str(e), file=sys.stderr)
         sys.exit(1)
     finally:
-        if cover_path and "bili_cover_" in cover_path.name and cover_path.is_file():
+        if cover_is_temp and cover_path.is_file():
             try:
                 cover_path.unlink()
             except OSError:
