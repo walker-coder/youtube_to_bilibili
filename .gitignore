@@ -4,9 +4,14 @@ youtube_cookies.txt
 www.youtube.com_cookies
 www.youtube.com_cookies.txt
 
-# 本地视频与下载未完成文件，勿提交
-video_subs/*.mp4
-video_subs/*.mkv
-video_subs/*.webm
+# 本地视频、字幕缓存目录，勿提交
+video_subs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.class
+
+# 下载未完成文件
 *.part
 *.ytdl
