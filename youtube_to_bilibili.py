@@ -267,7 +267,7 @@ def run_pipeline(
         out_bilingual,
         title=title,
         desc=desc,
-        tags=["YouTube", "中英字幕", "转载"],
+        tags=["YouTube", "中英字幕", "转载", "Bloomberg"],
         source=f"YouTube: {url[:180]}",
     )
     print("投稿成功:", result)
