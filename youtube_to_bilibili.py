@@ -20,7 +20,7 @@
 - 若链接含 &list=（播放列表），脚本已默认 noplaylist，只处理当前 watch?v= 视频；也可手动改成仅 https://www.youtube.com/watch?v=视频ID 。
 - 若使用 cookies 后出现「Requested format is not available」：cookie 已生效，但带登录态时需通过 YouTube 验证，本机须安装 Deno/Node 等（见 https://github.com/yt-dlp/yt-dlp/wiki/EJS ）。脚本会先带 cookie 下载，失败则自动去掉 cookie 重试。可选环境变量：YTDLP_DENO_PATH / YTDLP_NODE_PATH 指向 deno.exe、node.exe（未加入 PATH 时）。
 - 云服务器常见 IPv6 不通导致连接失败：默认启用 yt-dlp 的 force_ipv4（等同 --force-ipv4）。若需走 IPv6，设置环境变量 YTDLP_FORCE_IPV4=0。
-- 机房 IP 易出现视频流 403：默认使用 extractor 参数 `player_client=android`（可用环境变量 `YTDLP_YOUTUBE_PLAYER_CLIENT` 覆盖，逗号分隔，如 `android,web`；设为 `none` 则不用）。仍 403 时请在服务器放置 **youtube_cookies.txt**（浏览器导出 Netscape）。
+- 机房 IP / 新版 YouTube：默认 `player_client=android_vr`（多数环境下不要求 GVS PO Token；旧版 `android` 常需 PO Token，见 yt-dlp PO-Token-Guide）。可用环境变量 `YTDLP_YOUTUBE_PLAYER_CLIENT` 覆盖（如 `android,web`）；设为 `none` 则不用。仍 403 时请在服务器放置 **youtube_cookies.txt**（浏览器导出 Netscape）。
 """
 
 from __future__ import annotations
@@ -61,8 +61,8 @@ def _find_project_root_youtube_cookies() -> Path | None:
 
 
 def _youtube_extractor_args() -> dict | None:
-    """缓解 YouTube 对数据中心 IP 的 403 / SABR；默认 android 客户端。环境变量 YTDLP_YOUTUBE_PLAYER_CLIENT=none 关闭。"""
-    raw = (os.environ.get("YTDLP_YOUTUBE_PLAYER_CLIENT") or "android").strip().lower()
+    """缓解 YouTube 403 / SABR；默认 android_vr（通常不需 GVS PO Token）。YTDLP_YOUTUBE_PLAYER_CLIENT=none 关闭。"""
+    raw = (os.environ.get("YTDLP_YOUTUBE_PLAYER_CLIENT") or "android_vr").strip().lower()
     if raw in ("none", "off", "0", "false", "no"):
         return None
     clients = [x.strip() for x in raw.replace(";", ",").split(",") if x.strip()]
@@ -140,7 +140,9 @@ def _is_unavailable_format_error(e: BaseException) -> bool:
 def _raise_no_1080_stream(err: BaseException) -> None:
     raise RuntimeError(
         "未找到 1080p 视频流，已按要求停止（不下载更低清晰度）。"
-        "请尝试：更新 yt-dlp、放置 youtube_cookies.txt、设置 YTDLP_YOUTUBE_PLAYER_CLIENT=android 等。"
+        "请尝试：更新 yt-dlp；若日志出现 PO Token / GVS：默认已用 android_vr，也可试 "
+        "YTDLP_YOUTUBE_PLAYER_CLIENT=tv 或按 https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide 配置；"
+        "并放置 youtube_cookies.txt。"
     ) from err
 
 

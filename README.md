@@ -12,7 +12,7 @@
 
 云服务器若 **IPv6 不通**（`curl -6` 失败），下载默认启用 **仅 IPv4**（等同 `yt-dlp --force-ipv4`，环境变量 `YTDLP_FORCE_IPV4` 默认为 `1`）。若必须走 IPv6，设置 `YTDLP_FORCE_IPV4=0`。
 
-若视频流仍 **HTTP 403**：脚本默认 `YTDLP_YOUTUBE_PLAYER_CLIENT=android`（可多客户端：`android,web`）；并请在服务器放置 **youtube_cookies.txt**（从本机浏览器导出 Netscape cookies 后上传）。仍失败则执行 `yt-dlp -U` 升级。
+若下载失败且日志出现 **PO Token / GVS**：新版 YouTube 下旧 `android` 客户端常需 PO Token；本仓库默认 **`YTDLP_YOUTUBE_PLAYER_CLIENT=android_vr`**（多数环境不要求 GVS PO Token）。仍失败时可试 `tv`、`web` 等或见 [yt-dlp PO Token 说明](https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide)。若仍 **HTTP 403**，请在服务器放置 **youtube_cookies.txt**。并执行 `yt-dlp -U` 保持最新。
 
 ## 安装
 
@@ -68,7 +68,7 @@ chmod +x run_youtube_to_bilibili_bg.sh
 ./run_youtube_to_bilibili_bg.sh JOU5iy56FjY --no-upload
 ```
 
-其余参数（如 `--title`、`--no-review-wait`）写在视频 ID 之后即可。脚本默认使用 **`python3.11`**；若要改用其它解释器，可先执行 `export PYTHON=python3`（或指向虚拟环境里 `python`）。查看进度：`tail -f logs/youtube_to_bilibili_<视频ID>_*.log`（具体文件名以脚本输出为准）。
+其余参数（如 `--title`、`--no-review-wait`）写在视频 ID 之后即可。脚本默认使用 **`python3.11`**；若要改用其它解释器，可先执行 `export PYTHON=python3`（或指向虚拟环境里 `python`）。脚本内默认 **`export YTDLP_YOUTUBE_PLAYER_CLIENT=android_vr`**（若已在环境变量里设置过则不会覆盖）。查看进度：`tail -f logs/youtube_to_bilibili_<视频ID>_*.log`（具体文件名以脚本输出为准）。
 
 ### 从中间步骤继续
 
