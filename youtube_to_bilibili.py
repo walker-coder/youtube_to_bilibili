@@ -144,6 +144,58 @@ def _raise_no_1080_stream(err: BaseException) -> None:
     ) from err
 
 
+def _log_youtube_download_quality(info: dict) -> None:
+    """打印 yt-dlp 返回的已下载视频清晰度与编码（stdout，便于 nohup/重定向进日志）。"""
+    w = info.get("width")
+    h = info.get("height")
+    res = (info.get("resolution") or "").strip()
+    fid = (info.get("format_id") or "").strip()
+    vc = (info.get("vcodec") or "").strip() or None
+    ac = (info.get("acodec") or "").strip() or None
+
+    bits: list[str] = []
+    if w and h:
+        bits.append(f"{w}x{h}")
+    elif h:
+        bits.append(f"{h}p")
+    if res and res not in bits and not (w and h):
+        bits.append(res)
+    if fid:
+        bits.append(f"format_id={fid}")
+    if vc and vc != "none":
+        bits.append(f"vcodec={vc}")
+    if ac and ac != "none":
+        bits.append(f"acodec={ac}")
+
+    summary = "; ".join(bits) if bits else "（顶层未含分辨率，见分轨）"
+    print(f"  拉取到的清晰度: {summary}")
+
+    rd = info.get("requested_downloads") or []
+    if rd:
+        print("  分轨详情:")
+        for i, r in enumerate(rd, 1):
+            rf = (r.get("format_id") or "?").strip()
+            rw = r.get("width")
+            rh = r.get("height")
+            rvc = (r.get("vcodec") or "").strip()
+            rac = (r.get("acodec") or "").strip()
+            rsize = r.get("filesize") or r.get("filesize_approx")
+            dim = f"{rw}x{rh}" if rw and rh else (f"{rh}p" if rh else "")
+            line = f"    轨 {i}: format_id={rf}"
+            if dim:
+                line += f", {dim}"
+            if rvc and rvc != "none":
+                line += f", vcodec={rvc}"
+            if rac and rac != "none":
+                line += f", acodec={rac}"
+            if rsize is not None:
+                try:
+                    line += f", ~{int(rsize) // (1024 * 1024)}MiB"
+                except (TypeError, ValueError):
+                    pass
+            print(line)
+
+
 def _youtube_upload_date_label(info: dict) -> str | None:
     """从 yt-dlp 信息解析上传日期，格式与 YouTube 页常见展示一致：M/D/YYYY（如 3/27/2026）。"""
     ud = (info.get("upload_date") or info.get("release_date") or "").strip()
@@ -239,6 +291,7 @@ def download_youtube(
     vid = str(info.get("id") or "")
     if not vid:
         raise RuntimeError("无法解析视频 ID")
+    _log_youtube_download_quality(info)
     title = (info.get("title") or "video").strip()
     date_label = _youtube_upload_date_label(info)
     video_path = _resolve_downloaded_video(info, vid)
