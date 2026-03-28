@@ -35,6 +35,15 @@ FREE_CONCURRENT_WORKERS = 5
 # 免费翻译时每批之间的间隔（秒），略降限流概率
 FREE_BATCH_DELAY = 0.15
 
+
+def _zip_eq(a, b):
+    """与 Python 3.10+ 的 zip(..., strict=True) 相同，兼容 3.9。"""
+    la, lb = len(a), len(b)
+    if la != lb:
+        raise ValueError(f"zip 参数长度不一致: {la} != {lb}")
+    return zip(a, b)
+
+
 # 视为非对话、不翻译：整块仅为 [音效/说明] 时保留原文
 _BRACKET_ONLY = re.compile(r"^\s*\[[\s\S]*?\]\s*$", re.MULTILINE)
 
@@ -204,7 +213,7 @@ def translate_vtt_to_zh_hans(vtt_path: str | Path) -> Path:
         for idx_list, text_list in batches:
             try:
                 translated = _translate_batch_via_google_api(text_list)
-                for idx, zh in zip(idx_list, translated, strict=True):
+                for idx, zh in _zip_eq(idx_list, translated):
                     zh_blocks[idx] = zh or cues[idx][1]
             except Exception as e:
                 print(f"  本批翻译失败，保留原文: {e!r}")
@@ -214,7 +223,7 @@ def translate_vtt_to_zh_hans(vtt_path: str | Path) -> Path:
             print(f"  已处理 {done}/{len(cues)} 条")
         # 组装输出
         out_lines = ["WEBVTT", "Kind: captions", "Language: zh-Hans", ""]
-        for (time_line, _), zh_block in zip(cues, zh_blocks, strict=True):
+        for (time_line, _), zh_block in _zip_eq(cues, zh_blocks):
             out_lines.append(time_line)
             out_lines.append(zh_block)
             out_lines.append("")
@@ -243,7 +252,7 @@ def translate_vtt_to_zh_hans(vtt_path: str | Path) -> Path:
                     time.sleep(FREE_BATCH_DELAY)
 
         out_lines = ["WEBVTT", "Kind: captions", "Language: zh-Hans", ""]
-        for (time_line, _), zh_block in zip(cues, zh_blocks, strict=True):
+        for (time_line, _), zh_block in _zip_eq(cues, zh_blocks):
             out_lines.append(time_line)
             out_lines.append(zh_block)
             out_lines.append("")

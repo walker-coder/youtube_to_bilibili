@@ -56,6 +56,23 @@ python youtube_to_bilibili.py "https://www.youtube.com/watch?v=..."
 - 若不需要上传后轮询审核与自动剪片：加 `--no-review-wait`。
 - 其它说明见 `youtube_to_bilibili.py` 文件头注释。
 
+### 从中间步骤继续
+
+若下载已完成但后续步骤失败（例如翻译中断），可在 **`video_subs/`** 里文件齐全的前提下用 `resume_youtube_pipeline.py` 续跑，无需重下视频：
+
+```bash
+# 已有 yt_<视频ID>.mp4 与英文字幕，从翻译开始 → 烧录 → 上传
+python resume_youtube_pipeline.py --from translate --vid 视频ID --url "https://www.youtube.com/watch?v=..."
+
+# 已有中英 .vtt，仅从烧录开始
+python resume_youtube_pipeline.py --from burn --vid 视频ID --url "..."
+
+# 已有 yt_<视频ID>_bilingual.mp4，仅上传
+python resume_youtube_pipeline.py --from upload --vid 视频ID --url "..."
+```
+
+只生成本地双语、不上传时可加 `--no-upload`（此时可不传 `--url`）。参数 `--title`、`--no-review-wait`、`--cookies` 等与一键脚本含义一致。
+
 ## 其它脚本
 
 | 脚本 | 说明 |
@@ -65,6 +82,7 @@ python youtube_to_bilibili.py "https://www.youtube.com/watch?v=..."
 | `download_bloomberg_china_show.py` | 按搜索词下载 Bloomberg「China Show」相关视频到 `video_subs/` |
 | `bilingual_subs_to_video.py` | 将英/中字幕烧录进视频（流水线内部会调用） |
 | `translate_subs_to_zh_hans.py` / `vtt_to_srt.py` | 翻译与字幕格式转换 |
+| `resume_youtube_pipeline.py` | 从翻译/烧录/上传任一步继续，不重新下载（见上「从中间步骤继续」） |
 
 ## 审核轮询（可选环境变量）
 
