@@ -1,0 +1,12 @@
+bilibili_cookie.env
+# YouTube：浏览器导出的 Netscape cookies，勿提交
+youtube_cookies.txt
+www.youtube.com_cookies
+www.youtube.com_cookies.txt
+
+# 本地视频与下载未完成文件，勿提交
+video_subs/*.mp4
+video_subs/*.mkv
+video_subs/*.webm
+*.part
+*.ytdl
