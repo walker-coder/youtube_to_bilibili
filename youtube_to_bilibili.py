@@ -16,7 +16,7 @@
 - 转载投稿须自行确保有权使用素材，并遵守哔哩哔哩社区规范。
 - YouTube 登录态：不要用 bilibili_cookie.env（那是 B 站 KEY=value）。将浏览器导出的 Netscape 文件放在项目根目录，命名为 youtube_cookies.txt 或扩展默认名 www.youtube.com_cookies（.txt 可无），或传 --cookies / 环境变量 YOUTUBE_COOKIES_FILE。
 - 若下载仍慢：先 yt-dlp -U；再配合 cookies 常能缓解限速。
-- B 站投稿标题：默认在开头附加 YouTube 上传日期（M/D/YYYY，与站点元数据 upload_date 一致），再接原标题或 --title。
+- B 站投稿标题：默认会先去掉 YouTube 原标题末尾「| The China Show M/D/YYYY」（及可选尾随 |），再格式化为「清理后标题或 --title | YYYY/MM/DD」（YouTube upload_date）；无上传日期元数据时仅用标题。
 - 上传成功后会轮询创作中心审核：若「已退回」且稿件问题中含【HH:MM:SS-HH:MM:SS】，则剪除对应片段并替换稿件后结束（不再轮询）。可用 --no-review-wait 关闭。环境变量见 bilibili_review.py。
 - 流水线最后一步会清理 **video_subs/** 下当前视频的中间文件（下载的 mp4、vtt、srt 等），**仅保留** `yt_<视频ID>_bilingual.mp4`；其它视频 ID 的文件不受影响。
 - 若链接含 &list=（播放列表），脚本已默认 noplaylist，只处理当前 watch?v= 视频；也可手动改成仅 https://www.youtube.com/watch?v=视频ID 。
@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
+import signal
 import subprocess
 import sys
 from datetime import datetime
@@ -45,6 +47,29 @@ from vtt_to_srt import vtt_to_srt
 
 # 仅 1080p：DASH 合并（最佳 1080p 视频轨 + 最佳音频）或极少数单文件 1080p；无匹配则 yt-dlp 失败。
 YOUTUBE_FORMAT_1080P_ONLY = "bestvideo[height=1080]+bestaudio/best[height=1080]"
+
+# 供 SIGINT/SIGTERM 时终止子进程（如 bilingual_subs_to_video）
+_pipeline_child: subprocess.Popen | None = None
+
+
+def _set_pipeline_child(p: subprocess.Popen | None) -> None:
+    global _pipeline_child
+    _pipeline_child = p
+
+
+def _on_pipeline_signal(signum: int, frame) -> None:
+    print(
+        f"\n[{datetime.now().isoformat()}] 流水线被中断（signal {signum}）",
+        flush=True,
+    )
+    c = _pipeline_child
+    if c is not None and c.poll() is None:
+        try:
+            c.terminate()
+        except OSError:
+            pass
+    raise SystemExit(130)
+
 
 # 浏览器扩展导出的 Netscape cookies，与 bilibili_cookie.env（B 站 KEY=value）不是同一种文件
 # 按顺序尝试：自定义名 → 扩展默认导出名（如 Get cookies.txt LOCALLY）
@@ -247,13 +272,26 @@ def _log_youtube_download_quality(info: dict) -> None:
             print(line)
 
 
-def _youtube_upload_date_label(info: dict) -> str | None:
-    """从 yt-dlp 信息解析上传日期，格式与 YouTube 页常见展示一致：M/D/YYYY（如 3/27/2026）。"""
+_RE_CHINA_SHOW_TITLE_SUFFIX = re.compile(
+    r"\s*\|\s*The China Show\s+\d{1,2}/\d{1,2}/\d{4}\s*\|?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _strip_china_show_title_suffix(title: str) -> str:
+    """去掉 Bloomberg 节目名单独出现在末尾时的「| The China Show M/D/YYYY」（及可选尾随 |）。"""
+    raw = title.strip()
+    stripped = _RE_CHINA_SHOW_TITLE_SUFFIX.sub("", raw).strip()
+    return stripped if stripped else raw
+
+
+def _youtube_upload_date_ymd_slash(info: dict) -> str | None:
+    """从 yt-dlp 信息解析上传日期，格式 YYYY/MM/DD（用于 B 站标题后缀）。"""
     ud = (info.get("upload_date") or info.get("release_date") or "").strip()
     if len(ud) == 8 and ud.isdigit():
         try:
             dt = datetime.strptime(ud, "%Y%m%d")
-            return f"{dt.month}/{dt.day}/{dt.year}"
+            return f"{dt.year}/{dt.month:02d}/{dt.day:02d}"
         except ValueError:
             pass
     return None
@@ -265,7 +303,7 @@ def download_youtube(
     cookies_file: str | None = None,
     no_youtube_cookies: bool = False,
 ) -> tuple[Path, Path, str, str, str | None]:
-    """返回 (视频路径, 英文字幕 vtt 路径, 视频 ID, YouTube 标题, 上传日期标签或 None)。"""
+    """返回 (视频路径, 英文字幕 vtt 路径, 视频 ID, YouTube 标题, 上传日期 YYYY/MM/DD 或 None)。"""
     ensure_video_subs_dir()
     cookie_path = None if no_youtube_cookies else _resolve_youtube_cookiefile(cookies_file)
 
@@ -344,10 +382,10 @@ def download_youtube(
         raise RuntimeError("无法解析视频 ID")
     _log_youtube_download_quality(info)
     title = (info.get("title") or "video").strip()
-    date_label = _youtube_upload_date_label(info)
+    date_ymd = _youtube_upload_date_ymd_slash(info)
     video_path = _resolve_downloaded_video(info, vid)
     en_vtt = _find_en_vtt(vid)
-    return video_path, en_vtt, vid, title, date_label
+    return video_path, en_vtt, vid, title, date_ymd
 
 
 def _youtube_extract_info_no_download(
@@ -426,7 +464,7 @@ def run_pipeline(
 
     vid: str
     yt_title: str
-    yt_date_label: str | None
+    yt_date_ymd: str | None
     video_path: Path | None = None
     en_vtt: Path | None = None
     zh_vtt: Path | None = None
@@ -434,14 +472,14 @@ def run_pipeline(
 
     if from_step <= 1:
         print(f"步骤 1/{total_steps}：下载 YouTube 视频与英文字幕…")
-        video_path, en_vtt, vid, yt_title, yt_date_label = download_youtube(
+        video_path, en_vtt, vid, yt_title, yt_date_ymd = download_youtube(
             url,
             cookies_file=cookies_file,
             no_youtube_cookies=no_youtube_cookies,
         )
         print(f"  视频: {video_path}")
-        if yt_date_label:
-            print(f"  上传日期: {yt_date_label}（将用于 B 站标题前缀）")
+        if yt_date_ymd:
+            print(f"  上传日期: {yt_date_ymd}（B 站标题：原标题 | 此日期）")
         print(f"  英文字幕: {en_vtt}")
     else:
         info = _youtube_extract_info_no_download(
@@ -455,13 +493,13 @@ def run_pipeline(
         if not vid:
             raise RuntimeError("无法解析视频 ID")
         yt_title = (info.get("title") or "video").strip()
-        yt_date_label = _youtube_upload_date_label(info)
+        yt_date_ymd = _youtube_upload_date_ymd_slash(info)
         if from_step <= 3:
             video_path = _find_local_video_for_id(vid)
             en_vtt = _find_en_vtt(vid)
             print(f"  视频: {video_path}")
-            if yt_date_label:
-                print(f"  上传日期: {yt_date_label}（将用于 B 站标题前缀）")
+            if yt_date_ymd:
+                print(f"  上传日期: {yt_date_ymd}（B 站标题：原标题 | 此日期）")
             print(f"  英文字幕: {en_vtt}")
         if from_step == 4:
             out_bilingual = VIDEO_SUBS_DIR / f"yt_{vid}_bilingual.mp4"
@@ -500,8 +538,15 @@ def run_pipeline(
             "-o",
             str(out_bilingual),
         ]
-        r = subprocess.run(cmd, cwd=str(PROJECT_ROOT))
-        if r.returncode != 0:
+        p = subprocess.Popen(cmd, cwd=str(PROJECT_ROOT))
+        _set_pipeline_child(p)
+        try:
+            code = p.wait()
+        finally:
+            _set_pipeline_child(None)
+        if code == 130:
+            raise SystemExit(130)
+        if code != 0:
             raise RuntimeError("烧录字幕失败（bilingual_subs_to_video.py 退出码非 0）")
         print(f"  已生成: {out_bilingual}")
     else:
@@ -515,9 +560,13 @@ def run_pipeline(
 
     review_after = not no_review_wait
     print(f"步骤 4/{total_steps}：上传哔哩哔哩…")
-    base_title = bilibili_title or yt_title
-    if yt_date_label:
-        title = f"{yt_date_label} {base_title}"
+    base_title = (
+        bilibili_title.strip()
+        if bilibili_title
+        else _strip_china_show_title_suffix(yt_title)
+    )
+    if yt_date_ymd:
+        title = f"{base_title} | {yt_date_ymd}"
     else:
         title = base_title
     title = title[:80]
@@ -529,7 +578,7 @@ def run_pipeline(
         out_bilingual,
         title=title,
         desc=desc,
-        tags=["YouTube", "中英字幕", "转载", "Bloomberg"],
+        tags=["YouTube", "中英字幕", "转载", "Bloomberg", "The China Show"],
         source=f"YouTube: {url[:180]}",
     )
     print("投稿成功:", result)
@@ -585,6 +634,8 @@ def main() -> None:
         help="从第 N 步开始：1=下载（默认）2=翻译 3=烧录 4=上传；2–4 需同一 URL 且 video_subs 内已有对应中间文件",
     )
     args = ap.parse_args()
+    old_int = signal.signal(signal.SIGINT, _on_pipeline_signal)
+    old_term = signal.signal(signal.SIGTERM, _on_pipeline_signal) if hasattr(signal, "SIGTERM") else None
     try:
         run_pipeline(
             args.url,
@@ -598,6 +649,16 @@ def main() -> None:
     except (RuntimeError, FileNotFoundError, DownloadError, TimeoutError) as e:
         print(f"错误: {e}", file=sys.stderr)
         sys.exit(1)
+    except KeyboardInterrupt:
+        print(
+            f"\n[{datetime.now().isoformat()}] 流水线被中断（KeyboardInterrupt）",
+            flush=True,
+        )
+        sys.exit(130)
+    finally:
+        signal.signal(signal.SIGINT, old_int)
+        if old_term is not None:
+            signal.signal(signal.SIGTERM, old_term)
 
 
 if __name__ == "__main__":

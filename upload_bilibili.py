@@ -224,7 +224,7 @@ def main() -> None:
         "转载自 YouTube Bloomberg Television / The China Show。\n"
         "仅供个人学习交流，如有侵权请联系删除。"
     )
-    tags = ["财经", "Bloomberg", "China"]
+    tags = ["财经", "Bloomberg", "China", "The China Show"]
 
     try:
         cover_path, cover_is_temp = _resolve_cover_path(video_path)

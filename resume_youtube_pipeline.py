@@ -29,8 +29,9 @@ from youtube_to_bilibili import (
     _find_en_vtt,
     _js_runtimes_from_env,
     _resolve_youtube_cookiefile,
+    _strip_china_show_title_suffix,
     _youtube_extractor_args,
-    _youtube_upload_date_label,
+    _youtube_upload_date_ymd_slash,
 )
 
 
@@ -59,7 +60,7 @@ def _fetch_youtube_metadata(
     cookies_file: str | None,
     no_youtube_cookies: bool,
 ) -> tuple[str, str | None, str]:
-    """返回 (YouTube 标题, 上传日期标签或 None, 解析到的视频 id)。"""
+    """返回 (YouTube 标题, 上传日期 YYYY/MM/DD 或 None, 解析到的视频 id)。"""
     ensure_video_subs_dir()
     cookie_path = None if no_youtube_cookies else _resolve_youtube_cookiefile(cookies_file)
 
@@ -105,9 +106,9 @@ def _fetch_youtube_metadata(
         raise RuntimeError("yt-dlp 未返回视频信息")
 
     title = (info.get("title") or "video").strip()
-    date_label = _youtube_upload_date_label(info)
+    date_ymd = _youtube_upload_date_ymd_slash(info)
     got_id = str(info.get("id") or "").strip()
-    return title, date_label, got_id
+    return title, date_ymd, got_id
 
 
 def _burn_bilingual(vid: str, video_path: Path, en_vtt: Path, zh_vtt: Path) -> Path:
@@ -139,16 +140,20 @@ def _upload_and_maybe_review(
     url: str,
     out_bilingual: Path,
     yt_title: str,
-    yt_date_label: str | None,
+    yt_date_ymd: str | None,
     bilibili_title: str | None,
     no_review_wait: bool,
 ) -> None:
     review_after = not no_review_wait
     total_steps = 5 if review_after else 4
     print(f"步骤 4/{total_steps}：上传哔哩哔哩…")
-    base_title = bilibili_title or yt_title
-    if yt_date_label:
-        title = f"{yt_date_label} {base_title}"
+    base_title = (
+        bilibili_title.strip()
+        if bilibili_title
+        else _strip_china_show_title_suffix(yt_title)
+    )
+    if yt_date_ymd:
+        title = f"{base_title} | {yt_date_ymd}"
     else:
         title = base_title
     title = title[:80]
@@ -160,7 +165,7 @@ def _upload_and_maybe_review(
         out_bilingual,
         title=title,
         desc=desc,
-        tags=["YouTube", "中英字幕", "转载", "Bloomberg"],
+        tags=["YouTube", "中英字幕", "转载", "Bloomberg", "The China Show"],
         source=f"YouTube: {url[:180]}",
     )
     print("投稿成功:", result)
@@ -195,10 +200,10 @@ def run_from(
         raise ValueError("上传 B 站需要 --url（用于简介中的原链接与拉取标题/日期）")
 
     yt_title = ""
-    yt_date_label: str | None = None
+    yt_date_ymd: str | None = None
     if need_url:
         assert url is not None
-        yt_title, yt_date_label, got_id = _fetch_youtube_metadata(
+        yt_title, yt_date_ymd, got_id = _fetch_youtube_metadata(
             url.strip(),
             cookies_file=cookies_file,
             no_youtube_cookies=no_youtube_cookies,
@@ -209,8 +214,8 @@ def run_from(
                 file=sys.stderr,
             )
         print(f"  YouTube 标题: {yt_title}")
-        if yt_date_label:
-            print(f"  上传日期: {yt_date_label}（将用于 B 站标题前缀）")
+        if yt_date_ymd:
+            print(f"  上传日期: {yt_date_ymd}（B 站标题：原标题 | 此日期）")
 
     out_bilingual: Path | None = None
 
@@ -260,7 +265,7 @@ def run_from(
         url=url.strip(),
         out_bilingual=out_bilingual,
         yt_title=yt_title,
-        yt_date_label=yt_date_label,
+        yt_date_ymd=yt_date_ymd,
         bilibili_title=bilibili_title,
         no_review_wait=no_review_wait,
     )

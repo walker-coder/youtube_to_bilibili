@@ -4,7 +4,7 @@
 #   chmod +x run_youtube_to_bilibili_bg.sh
 #   ./run_youtube_to_bilibili_bg.sh JOU5iy56FjY
 #   ./run_youtube_to_bilibili_bg.sh JOU5iy56FjY --no-upload
-# 日志在 logs/ 目录；进程为 nohup 后台任务，断开 SSH 后仍继续跑。
+# 日志在 logs/ 目录（含步骤 3 烧录进度与中断记录，均写入下方 LOG）；进程为 nohup 后台任务，断开 SSH 后仍继续跑。
 # 默认使用 python3.11；可通过环境变量 PYTHON 覆盖，例如：PYTHON=python3 ./run_youtube_to_bilibili_bg.sh ...
 # 默认 YTDLP_YOUTUBE_PLAYER_CLIENT=android_vr（避免 android 客户端缺 PO Token）；若已在外部 export 则沿用。
 

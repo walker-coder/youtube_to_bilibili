@@ -11,15 +11,18 @@
   python bilingual_subs_to_video.py --seconds 90 -o video_subs/preview_bilingual_90s.mp4
   python bilingual_subs_to_video.py --video video_subs/输出.mp4 -o video_subs/输出_双语.mp4
   python bilingual_subs_to_video.py --keep-ass video_subs/1_bilingual.ass
+  烧录时输出进度百分比到 stdout（由上层 nohup 重定向时写入同一日志文件）；SIGINT/SIGTERM 会记录中断时间。
 """
 
 from __future__ import annotations
 
 import argparse
 import re
+import signal
 import subprocess
 import sys
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 from paths_config import PROJECT_ROOT, VIDEO_SUBS_DIR, ensure_video_subs_dir
@@ -181,7 +184,50 @@ def _export_pngs(
     print(f"已导出 {n} 张 PNG 到: {out_dir}")
 
 
-def _burn_ffmpeg(video: Path, ass_path: Path, output: Path, *, duration_sec: float | None = None) -> None:
+def _ffprobe_duration_sec(video: Path) -> float | None:
+    """返回视频时长（秒），失败时 None。"""
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(video.resolve()),
+    ]
+    r = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if r.returncode != 0:
+        return None
+    try:
+        v = float((r.stdout or "").strip())
+        return v if v > 0 else None
+    except ValueError:
+        return None
+
+
+def _parse_ffmpeg_stderr_time_sec(line: str) -> float | None:
+    """从 ffmpeg 进度行解析已处理时长，例如 time=00:05:36.44。"""
+    m = re.search(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)", line)
+    if not m:
+        return None
+    h, m_, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
+    return h * 3600 + m_ * 60 + s
+
+
+def _burn_ffmpeg(
+    video: Path,
+    ass_path: Path,
+    output: Path,
+    *,
+    duration_sec: float | None = None,
+) -> None:
     """在项目根目录执行 ffmpeg，使用相对路径，避免 Windows 下 subtitles= 绝对路径解析错误。"""
     root = PROJECT_ROOT
     vid = video.resolve()
@@ -200,8 +246,9 @@ def _burn_ffmpeg(video: Path, ass_path: Path, output: Path, *, duration_sec: flo
         "-i",
         str(vid_rel).replace("\\", "/"),
     ]
-    if duration_sec is not None and duration_sec > 0:
-        cmd += ["-ss", "0", "-t", str(duration_sec)]
+    clip_sec = duration_sec
+    if clip_sec is not None and clip_sec > 0:
+        cmd += ["-ss", "0", "-t", str(clip_sec)]
     cmd += [
         "-vf",
         vf,
@@ -209,18 +256,86 @@ def _burn_ffmpeg(video: Path, ass_path: Path, output: Path, *, duration_sec: flo
         "copy",
         str(out_rel).replace("\\", "/"),
     ]
+    total_sec = clip_sec if (clip_sec is not None and clip_sec > 0) else _ffprobe_duration_sec(vid)
+    ts0 = datetime.now().isoformat()
+    print(f"[{ts0}] 开始烧录 → {out.name}")
     print("执行 (cwd=%s):" % root, " ".join(cmd))
-    r = subprocess.run(
-        cmd,
-        cwd=str(root),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    if r.returncode != 0:
-        print(r.stderr or r.stdout)
-        raise RuntimeError(f"ffmpeg 失败，退出码 {r.returncode}")
+    if total_sec:
+        print(f"  预计总时长: {total_sec:.1f}s（用于进度百分比）")
+
+    st: dict = {"proc": None, "interrupted": False}
+
+    def _on_sig(signum: int, frame) -> None:
+        st["interrupted"] = True
+        print(
+            f"\n[{datetime.now().isoformat()}] 烧录被中断（signal {signum}），正在终止 ffmpeg…",
+            flush=True,
+        )
+        p = st["proc"]
+        if p is not None and p.poll() is None:
+            try:
+                p.terminate()
+            except OSError:
+                pass
+
+    old_int = signal.signal(signal.SIGINT, _on_sig)
+    old_term = signal.signal(signal.SIGTERM, _on_sig) if hasattr(signal, "SIGTERM") else None
+
+    proc = None
+    stderr_lines: list[str] = []
+    last_int_pct = -1
+    tty = sys.stdout.isatty()
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(root),
+            stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        st["proc"] = proc
+        assert proc.stderr is not None
+        for line in proc.stderr:
+            stderr_lines.append(line)
+            t = _parse_ffmpeg_stderr_time_sec(line)
+            if t is None or not total_sec or total_sec <= 0:
+                continue
+            pct = min(100.0, 100.0 * t / total_sec)
+            ip = int(pct)
+            if ip > last_int_pct:
+                last_int_pct = ip
+                msg = f"  烧录进度: {pct:.1f}%"
+                if tty:
+                    print(f"\r{msg}", end="", flush=True)
+                else:
+                    print(msg, flush=True)
+        code = proc.wait()
+        if st["interrupted"]:
+            print(
+                f"\n[{datetime.now().isoformat()}] 烧录已中止（未完成输出）。",
+                flush=True,
+            )
+            raise SystemExit(130)
+        if code != 0:
+            tail = "".join(stderr_lines[-60:])
+            raise RuntimeError(f"ffmpeg 失败，退出码 {code}\n{tail}")
+        if total_sec:
+            if tty:
+                print(f"\r  烧录进度: 100.0%      ")
+            else:
+                print("  烧录进度: 100.0%", flush=True)
+        else:
+            print("  烧录完成（未解析到时长，无百分比）")
+        print(f"[{datetime.now().isoformat()}] 烧录结束 退出码=0 输出={out}", flush=True)
+    finally:
+        signal.signal(signal.SIGINT, old_int)
+        if old_term is not None:
+            signal.signal(signal.SIGTERM, old_term)
+        if proc is not None and proc.poll() is None:
+            proc.kill()
 
 
 def main() -> None:
