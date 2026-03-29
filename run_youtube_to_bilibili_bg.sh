@@ -9,6 +9,8 @@
 # 默认 YTDLP_YOUTUBE_PLAYER_CLIENT=android_vr（避免 android 客户端缺 PO Token）；若已在外部 export 则沿用。
 # 默认 BLOOMBREG_FFMPEG_BURN_ARGS=-threads 1（烧录字幕时降低 ffmpeg 并行与峰值内存，小内存 VPS 适用）；
 #   覆盖示例：BLOOMBREG_FFMPEG_BURN_ARGS='-threads 2' ./run_youtube_to_bilibili_bg.sh ...
+# 默认 BLOOMBREG_ASS_FONTNAME=Noto Sans CJK SC（Linux 烧录中文；Windows 可在外部 export 为 Microsoft YaHei）；
+#   覆盖示例：BLOOMBREG_ASS_FONTNAME='WenQuanYi Zen Hei' ./run_youtube_to_bilibili_bg.sh ...
 # 非交互重定向到文件时 Python 默认会块缓冲 stdout，异常退出时末尾几行/Traceback 可能未刷盘；
 #   故默认 PYTHONUNBUFFERED=1 且使用 python -u，便于日志完整记录终止原因（OOM/kill -9 仍无 traceback）。
 
@@ -34,6 +36,7 @@ PYTHON="${PYTHON:-python3.11}"
 export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 export YTDLP_YOUTUBE_PLAYER_CLIENT="${YTDLP_YOUTUBE_PLAYER_CLIENT:-android_vr}"
 export BLOOMBREG_FFMPEG_BURN_ARGS="${BLOOMBREG_FFMPEG_BURN_ARGS:--threads 1}"
+export BLOOMBREG_ASS_FONTNAME="${BLOOMBREG_ASS_FONTNAME:-Noto Sans CJK SC}"
 cd "$ROOT"
 
 nohup "$PYTHON" -u youtube_to_bilibili.py "$URL" "$@" >>"$LOG" 2>&1 &
@@ -44,6 +47,7 @@ echo "  视频 ID: ${VID}"
 echo "  URL:     ${URL}"
 echo "  yt-dlp:  YTDLP_YOUTUBE_PLAYER_CLIENT=${YTDLP_YOUTUBE_PLAYER_CLIENT}"
 echo "  烧录:    BLOOMBREG_FFMPEG_BURN_ARGS=${BLOOMBREG_FFMPEG_BURN_ARGS}"
+echo "  字幕字体: BLOOMBREG_ASS_FONTNAME=${BLOOMBREG_ASS_FONTNAME}"
 echo "  PID:     ${PID}"
 echo "  日志:    ${LOG}"
 echo "查看日志: tail -f ${LOG}"
