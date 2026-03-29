@@ -10,6 +10,9 @@ video_subs/
 # 后台脚本日志
 logs/
 
+# China Show 定时任务：已处理视频 ID 状态
+china_show_processed_video_ids.json
+
 # Python
 __pycache__/
 *.py[cod]

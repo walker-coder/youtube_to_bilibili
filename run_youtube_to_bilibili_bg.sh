@@ -9,6 +9,8 @@
 # 默认 YTDLP_YOUTUBE_PLAYER_CLIENT=android_vr（避免 android 客户端缺 PO Token）；若已在外部 export 则沿用。
 # 默认 BLOOMBREG_FFMPEG_BURN_ARGS=-threads 1（烧录字幕时降低 ffmpeg 并行与峰值内存，小内存 VPS 适用）；
 #   覆盖示例：BLOOMBREG_FFMPEG_BURN_ARGS='-threads 2' ./run_youtube_to_bilibili_bg.sh ...
+# 非交互重定向到文件时 Python 默认会块缓冲 stdout，异常退出时末尾几行/Traceback 可能未刷盘；
+#   故默认 PYTHONUNBUFFERED=1 且使用 python -u，便于日志完整记录终止原因（OOM/kill -9 仍无 traceback）。
 
 set -euo pipefail
 
@@ -29,11 +31,12 @@ STAMP="$(date +%Y%m%d_%H%M%S)"
 LOG="${LOG_DIR}/youtube_to_bilibili_${VID}_${STAMP}.log"
 
 PYTHON="${PYTHON:-python3.11}"
+export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 export YTDLP_YOUTUBE_PLAYER_CLIENT="${YTDLP_YOUTUBE_PLAYER_CLIENT:-android_vr}"
 export BLOOMBREG_FFMPEG_BURN_ARGS="${BLOOMBREG_FFMPEG_BURN_ARGS:--threads 1}"
 cd "$ROOT"
 
-nohup "$PYTHON" youtube_to_bilibili.py "$URL" "$@" >>"$LOG" 2>&1 &
+nohup "$PYTHON" -u youtube_to_bilibili.py "$URL" "$@" >>"$LOG" 2>&1 &
 PID=$!
 
 echo "已后台启动"

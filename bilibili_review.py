@@ -6,11 +6,15 @@
 环境变量（可选）：
   BILIBILI_REVIEW_POLL_INTERVAL_SEC  轮询间隔秒数，默认 30
   BILIBILI_REVIEW_MAX_WAIT_SEC       最长等待秒数，默认 7200
+  BILIBILI_REVIEW_DUMP_REJECT_TEXT=1  若退回但解析不到时间轴，将 API 合并原文写入 logs/bilibili_reject_raw_<BV>_<时间>.txt 便于核对格式
 
 单独补跑（已上传过、未走流水线步骤 5 时）：
   python bilibili_review.py BV1DhX1BVESJ
   python bilibili_review.py BV1DhX1BVESJ video_subs/yt_xxx_bilingual.mp4
   第二参数省略时自动选 video_subs 下最新 *_bilingual.mp4
+
+第一个参数必须是哔哩哔哩「稿件 BV 号」（创作中心或视频页地址里的 BVxxxxxxxx，共 12 位），
+不要使用 YouTube 视频 ID（如 yt_xxxx_bilingual 里的 11 位 ID），否则接口会返回 -400。
 """
 
 from __future__ import annotations
@@ -25,16 +29,50 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-# 【01:29:19-01:31:06】 或全角括号（少见）
-RE_TIME_RANGE = re.compile(
-    r"[【\[](\d{1,2}:\d{2}:\d{2})-(\d{1,2}:\d{2}:\d{2})[】\]]"
-)
+# 退回说明里常见：【01:29:19-01:31:06】、无括号、全角冒号/破折号、仅分:秒 等（见 extract_time_ranges_from_text）
+_DASH = r"[-–—~～]"
+
+# 标准 BV 号为 BV + 10 位（共 12 字符）；YouTube 视频 id 常为 11 位 [A-Za-z0-9_-]
+_RE_YOUTUBE_ID = re.compile(r"^[0-9A-Za-z_-]{11}$")
 
 
-def _hms_to_sec(hms: str) -> float:
-    p = hms.strip().split(":")
-    h, m, s = int(p[0]), int(p[1]), float(p[2])
-    return h * 3600 + m * 60 + s
+def _looks_like_youtube_video_id(s: str) -> bool:
+    return bool(_RE_YOUTUBE_ID.fullmatch(s.strip()))
+
+
+def normalize_bvid_cli_arg(raw: str) -> str:
+    """
+    解析命令行第一个参数为合法 BV 号。
+    若误传 YouTube 11 位 id，给出明确错误，避免被拼成 BVxxxxxxxxxxx 导致接口 -400。
+    """
+    s = raw.strip()
+    if not s.upper().startswith("BV"):
+        if _looks_like_youtube_video_id(s):
+            raise ValueError(
+                "第一个参数看起来像 YouTube 视频 ID（11 位），不是哔哩哔哩稿件 BV 号。\n"
+                "请到创作中心打开该稿件，复制完整 BV 号（BV + 10 位，共 12 位），"
+                "不要使用本地文件名里的 yt_xxxx 中的那段 ID。"
+            )
+        s = "BV" + s
+    if len(s) != 12:
+        raise ValueError(
+            f"BV 号长度应为 12（例如 BV1xxxxxxxxxx），当前为 {len(s)} 位：{s!r}。\n"
+            "请从哔哩哔哩视频页或创作中心复制完整 BV。"
+        )
+    return s
+
+
+def _parse_time_token(hms: str) -> float:
+    """
+    解析 ASS/退回说明里的时间：支持 H:MM:SS、HH:MM:SS，以及无小时的 MM:SS（按 分:秒）。
+    """
+    s = hms.strip().replace("\uFF1A", ":").replace("：", ":")
+    parts = s.split(":")
+    if len(parts) == 3:
+        return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+    if len(parts) == 2:
+        return int(parts[0]) * 60 + float(parts[1])
+    raise ValueError(f"无法解析时间: {hms!r}")
 
 
 def _ffprobe_duration(path: Path) -> float:
@@ -155,9 +193,50 @@ def ffmpeg_remove_time_ranges(input_path: Path, output_path: Path, ranges: list[
 
 
 def extract_time_ranges_from_text(text: str) -> list[tuple[float, float]]:
+    """
+    从退回说明 / API JSON 文本中提取「需删除」时间段（秒）。
+    支持：【HH:MM:SS-HH:MM:SS】、半角 []、无括号、全角冒号、多种破折号、MM:SS-MM:SS（无小时）等。
+    """
+    t = text.replace("\uFF1A", ":").replace("：", ":")
     out: list[tuple[float, float]] = []
-    for a, b in RE_TIME_RANGE.findall(text):
-        out.append((_hms_to_sec(a), _hms_to_sec(b)))
+    seen: set[tuple[float, float]] = set()
+
+    def add_pair(a: str, b: str) -> None:
+        try:
+            sa, sb = _parse_time_token(a), _parse_time_token(b)
+            if sb <= sa:
+                return
+            key = (round(sa, 3), round(sb, 3))
+            if key not in seen:
+                seen.add(key)
+                out.append((sa, sb))
+        except (ValueError, IndexError, OSError):
+            return
+
+    patterns = [
+        # 【01:29:19-01:31:06】
+        re.compile(
+            rf"[【\[](\d{{1,2}}:\d{{2}}:\d{{2}}){_DASH}(\d{{1,2}}:\d{{2}}:\d{{2}})[】\]]"
+        ),
+        # 正文里无括号，两段完整时刻
+        re.compile(
+            rf"(\d{{1,2}}:\d{{2}}:\d{{2}})\s*{_DASH}\s*(\d{{1,2}}:\d{{2}}:\d{{2}})"
+        ),
+        # 仅 分:秒（短片段）
+        re.compile(rf"[【\[](\d{{1,2}}:\d{{2}}){_DASH}(\d{{1,2}}:\d{{2}})[】\]]"),
+        re.compile(
+            rf"(?<![\d:])(\d{{1,2}}:\d{{2}})\s*{_DASH}\s*(\d{{1,2}}:\d{{2}})(?![\d:])"
+        ),
+        # 01:29:19 至 01:31:06
+        re.compile(
+            rf"(\d{{1,2}}:\d{{2}}:\d{{2}})\s*至\s*(\d{{1,2}}:\d{{2}}:\d{{2}})"
+        ),
+        re.compile(rf"(\d{{1,2}}:\d{{2}})\s*至\s*(\d{{1,2}}:\d{{2}})"),
+    ]
+    for pat in patterns:
+        for m in pat.finditer(t):
+            add_pair(m.group(1), m.group(2))
+
     return out
 
 
@@ -354,8 +433,20 @@ async def poll_and_repair_rejected(
             print("  哔哩哔哩审核：已退回，解析需删除的时间段…")
             ranges = extract_time_ranges_from_text(text)
             if not ranges:
+                dump = (os.environ.get("BILIBILI_REVIEW_DUMP_REJECT_TEXT") or "").strip().lower()
+                if dump in ("1", "true", "yes", "on", "y"):
+                    from paths_config import PROJECT_ROOT
+
+                    log_dir = PROJECT_ROOT / "logs"
+                    log_dir.mkdir(parents=True, exist_ok=True)
+                    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    fp = log_dir / f"bilibili_reject_raw_{bvid}_{stamp}.txt"
+                    fp.write_text(text, encoding="utf-8")
+                    print(f"  已写出退回相关 API 原文（便于核对时间格式）: {fp}")
                 raise RuntimeError(
-                    "退回稿件中未解析到【HH:MM:SS-HH:MM:SS】时间轴，请手动在网页处理。"
+                    "退回稿件中未解析到可识别的起止时间（支持【HH:MM:SS-HH:MM:SS】、无括号两段时刻、"
+                    "「至」连接、MM:SS 等）。请上创作中心查看审核说明；需要看接口原文时可设 "
+                    "BILIBILI_REVIEW_DUMP_REJECT_TEXT=1 后重跑，在 logs/ 下查看 bilibili_reject_raw_*.txt。"
                 )
             out = bilingual_mp4.with_name(bilingual_mp4.stem + "_recut.mp4")
             ffmpeg_remove_time_ranges(bilingual_mp4, out, ranges)
@@ -405,9 +496,11 @@ def main() -> None:
         help=f"本地双语 MP4（与首次投稿一致）；省略则用 {VIDEO_SUBS_DIR.name} 下最新 *_bilingual.mp4",
     )
     args = ap.parse_args()
-    bvid = args.bvid.strip()
-    if not bvid.upper().startswith("BV"):
-        bvid = "BV" + bvid
+    try:
+        bvid = normalize_bvid_cli_arg(args.bvid)
+    except ValueError as e:
+        print(f"错误: {e}", file=sys.stderr)
+        sys.exit(2)
     if args.video:
         vp = Path(args.video).resolve()
     else:

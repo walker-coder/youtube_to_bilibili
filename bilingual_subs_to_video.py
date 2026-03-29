@@ -7,6 +7,17 @@
 
 依赖：ffmpeg 在 PATH；可选 Pillow（仅 --export-pngs）。
 
+Linux 烧录中文若出现「方框/豆腐块」：系统缺少 ASS 里指定字体中的汉字字形。请安装含汉字的 CJK 字体，并用 ``fc-list | grep -i noto``（或 ``fc-list :lang=zh``）核对 fontconfig 中的**确切**字体名，设环境变量 ``BLOOMBREG_ASS_FONTNAME``（默认非 Windows 为 ``Noto Sans CJK SC``）。未设置时 Windows 默认 ``Microsoft YaHei``。
+
+  各发行版安装 Noto CJK 示例（包名可能随版本变化，以仓库为准）：
+  - Debian/Ubuntu: ``sudo apt install fonts-noto-cjk``
+  - Fedora / RHEL / CentOS Stream: ``sudo dnf install google-noto-sans-cjk-fonts``（或 ``dnf search noto cjk``）
+  - Arch Linux: ``sudo pacman -S noto-fonts-cjk``
+  - openSUSE: ``sudo zypper install google-noto-sans-cjk-fonts``（或 ``noto-sans-cjk-fonts``）
+  - Alpine: ``sudo apk add font-noto-cjk``
+  - Gentoo: ``emerge media-fonts/noto-cjk``
+  装完后执行 ``fc-cache -fv``（若字体放在 ``~/.local/share/fonts/`` 等自定义目录时尤其需要）。
+
 用法:
   python bilingual_subs_to_video.py --seconds 90 -o video_subs/preview_bilingual_90s.mp4
   python bilingual_subs_to_video.py --video video_subs/输出.mp4 -o video_subs/输出_双语.mp4
@@ -97,6 +108,16 @@ def _ass_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
 
 
+def _ass_fontname() -> str:
+    """ASS Style 中的 Fontname；libass 通过 fontconfig 解析。环境变量可覆盖。"""
+    env = (os.environ.get("BLOOMBREG_ASS_FONTNAME") or "").strip()
+    if env:
+        return env
+    if sys.platform == "win32":
+        return "Microsoft YaHei"
+    return "Noto Sans CJK SC"
+
+
 def _cue_to_ass_text(s: str) -> str:
     """
     将一条 SRT 字幕块内的多行，转为 ASS 单行内的 \\N 换行。
@@ -110,6 +131,7 @@ def _cue_to_ass_text(s: str) -> str:
 
 def _merge_to_ass(en_cues: list[dict], zh_cues: list[dict]) -> str:
     """生成 ASS：底部水平居中，上行中文、下行英文；黄底黑字（BorderStyle 3 不透明框）。"""
+    font = _ass_fontname()
     n = min(len(en_cues), len(zh_cues))
     if len(en_cues) != len(zh_cues):
         print(f"警告: 英 {len(en_cues)} 条、中 {len(zh_cues)} 条，仅合并前 {n} 条。")
@@ -131,7 +153,7 @@ def _merge_to_ass(en_cues: list[dict], zh_cues: list[dict]) -> str:
         "[V4+ Styles]",
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
         # BorderStyle=3：Back=亮黄；Primary=黑字；OutlineColour 勿用纯黑（见上行注释）。StrikeOut 后须接 ScaleX=100,ScaleY=100。
-        "Style: Default,Microsoft YaHei,64,&H00000000,&H00000000,&H0000FFFF,&H0000FFFF,-1,0,0,0,100,100,0,0,3,8,0,2,80,80,100,1",
+        f"Style: Default,{font},64,&H00000000,&H00000000,&H0000FFFF,&H0000FFFF,-1,0,0,0,100,100,0,0,3,8,0,2,80,80,100,1",
         "",
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",

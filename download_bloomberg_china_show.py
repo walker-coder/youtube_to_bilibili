@@ -6,12 +6,17 @@
 - 优先下载「今天」上传的视频；若没有，则下载搜索到的「最新一期」。
 - 画质：优先「最高清晰度」（需安装 ffmpeg 才能合并出有声音）；无 ffmpeg 时自动改用单文件（约 1080p，有声音）。
 
+供定时任务复用：fetch_china_show_entries()、filter_entries_by_upload_dates()、entry_watch_url()。
+
 python版本大于3.10
 使用前请安装:
   pip install -r requirements.txt
 """
 
+from __future__ import annotations
+
 from datetime import date, timedelta
+from typing import Any
 
 import yt_dlp
 
@@ -24,6 +29,42 @@ SEARCH_QUERY = "china show Bloomberg Television"
 OUTPUT_TEMPLATE = "Bloomberg_China_Show_%(title)s.%(ext)s"
 # 搜索条数，用于从中筛选今天上传的（取第一条匹配）
 SEARCH_COUNT = 10
+
+
+def fetch_china_show_entries(*, search_count: int | None = None) -> list[dict[str, Any]]:
+    """
+    仅拉取元数据，不下载。返回 yt_dlp 的 entry 字典列表（可能含 id、title、upload_date 等）。
+    """
+    n = search_count if search_count is not None else SEARCH_COUNT
+    search_string = f"ytsearch{n}:{SEARCH_QUERY}"
+    extract_opts = {
+        "quiet": True,
+        "extract_flat": False,
+    }
+    with yt_dlp.YoutubeDL(extract_opts) as ydl:
+        info = ydl.extract_info(search_string, download=False)
+    if not info or not info.get("entries"):
+        return []
+    return [e for e in info["entries"] if e]
+
+
+def filter_entries_by_upload_dates(
+    entries: list[dict[str, Any]],
+    dates_yyyymmdd: list[str],
+) -> list[dict[str, Any]]:
+    """只保留 upload_date 在给定 YYYYMMDD 列表中的条目（顺序与搜索一致）。"""
+    want = set(dates_yyyymmdd)
+    return [e for e in entries if (e.get("upload_date") or "") in want]
+
+
+def entry_watch_url(entry: dict[str, Any]) -> str | None:
+    vid = entry.get("id") or entry.get("url")
+    if not vid:
+        return None
+    s = str(vid)
+    if len(s) <= 15 and not s.startswith("http"):
+        return f"https://www.youtube.com/watch?v={s}"
+    return s if s.startswith("http") else None
 
 
 def _get_ydl_opts():
@@ -47,24 +88,16 @@ def _get_ydl_opts():
 
 
 def download_first_video():
-    today_list = [date.today().strftime("%Y%m%d"), (date.today() - timedelta(days=1)).strftime("%Y%m%d")]
-    search_string = f"ytsearch{SEARCH_COUNT}:{SEARCH_QUERY}"
-
-    # 先只拉取信息，不下载
-    extract_opts = {
-        "quiet": True,
-        "extract_flat": False,  # 需要每条的上传日期
-    }
-    with yt_dlp.YoutubeDL(extract_opts) as ydl:
-        info = ydl.extract_info(search_string, download=False)
-
-    if not info or not info.get("entries"):
+    today_list = [
+        date.today().strftime("%Y%m%d"),
+        (date.today() - timedelta(days=1)).strftime("%Y%m%d"),
+    ]
+    entries = fetch_china_show_entries()
+    if not entries:
         print("未搜到任何视频。")
         return
 
-    entries = [e for e in info["entries"] if e]
-    # 优先：今天上传的第一条
-    today_videos = [e for e in entries if e.get("upload_date") in today_list]
+    today_videos = filter_entries_by_upload_dates(entries, today_list)
     if today_videos:
         chosen = today_videos[0]
         print(f"找到今天上传的视频，准备下载：{chosen.get('title', '')}\n")
@@ -72,11 +105,10 @@ def download_first_video():
         chosen = entries[0]
         print(f"今天暂无新视频，改为下载最新一期：{chosen.get('title', '')}\n")
 
-    video_id = chosen.get("id") or chosen.get("url")
-    if not video_id:
+    video_url = entry_watch_url(chosen)
+    if not video_url:
         print("无法获取视频 ID。")
         return
-    video_url = f"https://www.youtube.com/watch?v={video_id}" if len(str(video_id)) <= 15 else video_id
 
     with yt_dlp.YoutubeDL(_get_ydl_opts()) as ydl:
         ydl.download([video_url])
