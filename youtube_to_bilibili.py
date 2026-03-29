@@ -586,7 +586,10 @@ def run_pipeline(
         bvid = result.get("bvid")
         if not bvid:
             raise RuntimeError("上传返回结果中缺少 bvid，无法轮询审核。")
-        print(f"步骤 5/{total_steps}：轮询审核状态（退回则按时间轴剪片并替换稿件）…")
+        print(
+            f"步骤 5/{total_steps}：轮询审核（退回则剪片替换；"
+            f"若仍退回会多轮处理，见 bilibili_review 与 BILIBILI_REVIEW_MAX_REPLACE_ROUNDS）…"
+        )
         from bilibili_review import run_review_flow_sync
 
         run_review_flow_sync(bvid, out_bilingual)

@@ -1,11 +1,12 @@
 """
-投稿后轮询哔哩哔哩审核状态：若「已退回」则解析稿件问题中的时间轴，剪除后通过编辑接口替换视频并再次提交；不再次轮询。
+投稿后轮询哔哩哔哩审核状态：若「已退回」则按时间轴剪片并替换稿件；**可再次退回**，则对最新本地成片重复解析→剪片→替换，直到「审核通过」或单轮超时或达到最大轮数。
 
 依赖 upload_bilibili 的 Cookie 配置、ffmpeg、与 bilibili-api。
 
 环境变量（可选）：
   BILIBILI_REVIEW_POLL_INTERVAL_SEC  轮询间隔秒数，默认 30
-  BILIBILI_REVIEW_MAX_WAIT_SEC       最长等待秒数，默认 7200
+  BILIBILI_REVIEW_MAX_WAIT_SEC       每一轮（从轮询到通过/退回/超时）最长等待秒数，默认 7200；替换后会开启新一轮轮询
+  BILIBILI_REVIEW_MAX_REPLACE_ROUNDS  最多剪片替换次数（含多轮退回），默认 20，防止无限循环
   BILIBILI_REVIEW_DUMP_REJECT_TEXT=1  若退回但解析不到时间轴，将 API 合并原文写入 logs/bilibili_reject_raw_<BV>_<时间>.txt 便于核对格式
 
 单独补跑（已上传过、未走流水线步骤 5 时）：
@@ -400,7 +401,10 @@ async def poll_and_repair_rejected(
     bvid: str,
     bilingual_mp4: Path,
 ) -> None:
-    """轮询至通过或退回；退回则剪片并编辑重传一次后结束。"""
+    """
+    轮询至通过；若退回则剪片替换，并可能对替换后的稿件再次轮询（多轮退回直到通过或达上限）。
+    每轮剪片输入为「当前线上稿件对应的本地文件」：首次为 bilingual_mp4，之后为上一轮生成的 *_recut.mp4。
+    """
     from upload_bilibili import _load_local_env
 
     _load_local_env()
@@ -411,59 +415,80 @@ async def poll_and_repair_rejected(
 
     interval = float(os.environ.get("BILIBILI_REVIEW_POLL_INTERVAL_SEC", "30"))
     max_wait = float(os.environ.get("BILIBILI_REVIEW_MAX_WAIT_SEC", "7200"))
+    max_rounds = int(os.environ.get("BILIBILI_REVIEW_MAX_REPLACE_ROUNDS", "20"))
+    if max_rounds < 1:
+        max_rounds = 1
+
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + max_wait
+    current: Path = Path(bilingual_mp4).resolve()
 
-    print(
-        f"开始轮询稿件 {bvid}：每 {interval:.0f} 秒查一次，最长 {max_wait:.0f} 秒。"
-        " 审核中时会持续打印进度（并非卡住）。"
-    )
-    n = 0
-    while loop.time() < deadline:
-        n += 1
-        archive_json, page_state = await _fetch_review_data(bvid, credential)
-        status = classify_review(archive_json, page_state)
-        text = _review_text_blob(archive_json, page_state)
+    round_idx = 0
+    while True:
+        round_idx += 1
+        if round_idx > max_rounds:
+            raise RuntimeError(
+                f"已超过最多审核/替换轮数 {max_rounds}（环境变量 BILIBILI_REVIEW_MAX_REPLACE_ROUNDS），"
+                "请手动在创作中心处理。"
+            )
+        if round_idx > 1:
+            print(
+                f"\n第 {round_idx} 轮：轮询稿件 {bvid}（本地基准视频: {current.name}）…"
+            )
 
-        if status == "passed":
-            print("  哔哩哔哩审核：已通过。")
-            return
-
-        if status == "rejected":
-            print("  哔哩哔哩审核：已退回，解析需删除的时间段…")
-            ranges = extract_time_ranges_from_text(text)
-            if not ranges:
-                dump = (os.environ.get("BILIBILI_REVIEW_DUMP_REJECT_TEXT") or "").strip().lower()
-                if dump in ("1", "true", "yes", "on", "y"):
-                    from paths_config import PROJECT_ROOT
-
-                    log_dir = PROJECT_ROOT / "logs"
-                    log_dir.mkdir(parents=True, exist_ok=True)
-                    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    fp = log_dir / f"bilibili_reject_raw_{bvid}_{stamp}.txt"
-                    fp.write_text(text, encoding="utf-8")
-                    print(f"  已写出退回相关 API 原文（便于核对时间格式）: {fp}")
-                raise RuntimeError(
-                    "退回稿件中未解析到可识别的起止时间（支持【HH:MM:SS-HH:MM:SS】、无括号两段时刻、"
-                    "「至」连接、MM:SS 等）。请上创作中心查看审核说明；需要看接口原文时可设 "
-                    "BILIBILI_REVIEW_DUMP_REJECT_TEXT=1 后重跑，在 logs/ 下查看 bilibili_reject_raw_*.txt。"
-                )
-            out = bilingual_mp4.with_name(bilingual_mp4.stem + "_recut.mp4")
-            ffmpeg_remove_time_ranges(bilingual_mp4, out, ranges)
-            print(f"  已剪除指定片段，输出: {out}")
-            print("  正在替换稿件视频并重新提交…")
-            await _replace_video_edit(bvid, out, credential)
-            print("  已提交修改，不再轮询审核状态。")
-            return
-
-        left = max(0.0, deadline - loop.time())
+        deadline = loop.time() + max_wait
         print(
-            f"  [{datetime.now().strftime('%H:%M:%S')}] 第 {n} 次：仍为审核中/待判定，"
-            f"约 {left:.0f} 秒后超时；{interval:.0f} 秒后再查…"
+            f"开始轮询稿件 {bvid}：每 {interval:.0f} 秒查一次，本轮最长 {max_wait:.0f} 秒。"
+            " 审核中时会持续打印进度（并非卡住）。"
         )
-        await asyncio.sleep(interval)
+        n = 0
+        while loop.time() < deadline:
+            n += 1
+            archive_json, page_state = await _fetch_review_data(bvid, credential)
+            status = classify_review(archive_json, page_state)
+            text = _review_text_blob(archive_json, page_state)
 
-    raise TimeoutError(f"{max_wait} 秒内未等到审核通过或退回，请稍后在创作中心查看。")
+            if status == "passed":
+                print("  哔哩哔哩审核：已通过。")
+                return
+
+            if status == "rejected":
+                print("  哔哩哔哩审核：已退回，解析需删除的时间段…")
+                ranges = extract_time_ranges_from_text(text)
+                if not ranges:
+                    dump = (os.environ.get("BILIBILI_REVIEW_DUMP_REJECT_TEXT") or "").strip().lower()
+                    if dump in ("1", "true", "yes", "on", "y"):
+                        from paths_config import PROJECT_ROOT
+
+                        log_dir = PROJECT_ROOT / "logs"
+                        log_dir.mkdir(parents=True, exist_ok=True)
+                        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        fp = log_dir / f"bilibili_reject_raw_{bvid}_{stamp}.txt"
+                        fp.write_text(text, encoding="utf-8")
+                        print(f"  已写出退回相关 API 原文（便于核对时间格式）: {fp}")
+                    raise RuntimeError(
+                        "退回稿件中未解析到可识别的起止时间（支持【HH:MM:SS-HH:MM:SS】、无括号两段时刻、"
+                        "「至」连接、MM:SS 等）。请上创作中心查看审核说明；需要看接口原文时可设 "
+                        "BILIBILI_REVIEW_DUMP_REJECT_TEXT=1 后重跑，在 logs/ 下查看 bilibili_reject_raw_*.txt。"
+                    )
+                out = current.with_name(current.stem + "_recut.mp4")
+                ffmpeg_remove_time_ranges(current, out, ranges)
+                print(f"  已剪除指定片段，输出: {out}")
+                print("  正在替换稿件视频并重新提交…")
+                await _replace_video_edit(bvid, out, credential)
+                current = out
+                print("  已提交修改，继续轮询审核…")
+                break
+
+            left = max(0.0, deadline - loop.time())
+            print(
+                f"  [{datetime.now().strftime('%H:%M:%S')}] 第 {n} 次：仍为审核中/待判定，"
+                f"约 {left:.0f} 秒后本轮超时；{interval:.0f} 秒后再查…"
+            )
+            await asyncio.sleep(interval)
+        else:
+            raise TimeoutError(
+                f"{max_wait} 秒内本轮未等到审核通过或退回，请稍后在创作中心查看。"
+            )
 
 
 def run_review_flow_sync(bvid: str, bilingual_mp4: str | Path) -> None:
