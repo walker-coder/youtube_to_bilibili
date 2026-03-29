@@ -7,6 +7,8 @@
 # 日志在 logs/ 目录（含步骤 3 烧录进度与中断记录，均写入下方 LOG）；进程为 nohup 后台任务，断开 SSH 后仍继续跑。
 # 默认使用 python3.11；可通过环境变量 PYTHON 覆盖，例如：PYTHON=python3 ./run_youtube_to_bilibili_bg.sh ...
 # 默认 YTDLP_YOUTUBE_PLAYER_CLIENT=android_vr（避免 android 客户端缺 PO Token）；若已在外部 export 则沿用。
+# 默认 BLOOMBREG_FFMPEG_BURN_ARGS=-threads 1（烧录字幕时降低 ffmpeg 并行与峰值内存，小内存 VPS 适用）；
+#   覆盖示例：BLOOMBREG_FFMPEG_BURN_ARGS='-threads 2' ./run_youtube_to_bilibili_bg.sh ...
 
 set -euo pipefail
 
@@ -28,6 +30,7 @@ LOG="${LOG_DIR}/youtube_to_bilibili_${VID}_${STAMP}.log"
 
 PYTHON="${PYTHON:-python3.11}"
 export YTDLP_YOUTUBE_PLAYER_CLIENT="${YTDLP_YOUTUBE_PLAYER_CLIENT:-android_vr}"
+export BLOOMBREG_FFMPEG_BURN_ARGS="${BLOOMBREG_FFMPEG_BURN_ARGS:--threads 1}"
 cd "$ROOT"
 
 nohup "$PYTHON" youtube_to_bilibili.py "$URL" "$@" >>"$LOG" 2>&1 &
@@ -37,6 +40,7 @@ echo "已后台启动"
 echo "  视频 ID: ${VID}"
 echo "  URL:     ${URL}"
 echo "  yt-dlp:  YTDLP_YOUTUBE_PLAYER_CLIENT=${YTDLP_YOUTUBE_PLAYER_CLIENT}"
+echo "  烧录:    BLOOMBREG_FFMPEG_BURN_ARGS=${BLOOMBREG_FFMPEG_BURN_ARGS}"
 echo "  PID:     ${PID}"
 echo "  日志:    ${LOG}"
 echo "查看日志: tail -f ${LOG}"

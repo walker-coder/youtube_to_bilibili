@@ -12,16 +12,20 @@
   python bilingual_subs_to_video.py --video video_subs/输出.mp4 -o video_subs/输出_双语.mp4
   python bilingual_subs_to_video.py --keep-ass video_subs/1_bilingual.ass
   烧录时输出进度百分比到 stdout（由上层 nohup 重定向时写入同一日志文件）；SIGINT/SIGTERM 会记录中断时间。
+  低内存：ffmpeg stderr 仅保留末尾若干行供报错用，不随时长无限增长。可选环境变量 BLOOMBREG_FFMPEG_BURN_ARGS（空格分隔，见 shlex），例如 `-threads 1` 降低并行与峰值内存。
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
 import uuid
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 
@@ -241,7 +245,8 @@ def _burn_ffmpeg(
         vid_rel, ass_rel, out_rel = vid, ass, out
     sub_path = str(ass_rel).replace("\\", "/")
     vf = f"subtitles={sub_path}:charenc=UTF-8"
-    cmd = ["ffmpeg", "-y"]
+    extra = shlex.split(os.environ.get("BLOOMBREG_FFMPEG_BURN_ARGS", "").strip())
+    cmd = ["ffmpeg", "-y", *extra]
     cmd += [
         "-i",
         str(vid_rel).replace("\\", "/"),
@@ -282,7 +287,7 @@ def _burn_ffmpeg(
     old_term = signal.signal(signal.SIGTERM, _on_sig) if hasattr(signal, "SIGTERM") else None
 
     proc = None
-    stderr_lines: list[str] = []
+    stderr_tail: deque[str] = deque(maxlen=60)
     last_int_pct = -1
     tty = sys.stdout.isatty()
     try:
@@ -299,7 +304,7 @@ def _burn_ffmpeg(
         st["proc"] = proc
         assert proc.stderr is not None
         for line in proc.stderr:
-            stderr_lines.append(line)
+            stderr_tail.append(line)
             t = _parse_ffmpeg_stderr_time_sec(line)
             if t is None or not total_sec or total_sec <= 0:
                 continue
@@ -320,7 +325,7 @@ def _burn_ffmpeg(
             )
             raise SystemExit(130)
         if code != 0:
-            tail = "".join(stderr_lines[-60:])
+            tail = "".join(stderr_tail)
             raise RuntimeError(f"ffmpeg 失败，退出码 {code}\n{tail}")
         if total_sec:
             if tty:
