@@ -7,6 +7,7 @@
   python youtube_to_bilibili.py "https://www.youtube.com/watch?v=xxxx"
   python youtube_to_bilibili.py "URL" --title "B站投稿标题"
   python youtube_to_bilibili.py "URL" --no-upload   # 只生成本地双语视频，不上传
+  python youtube_to_bilibili.py "URL" --from-step 3  # 从烧录字幕起（需已有本地视频与英/简中 VTT）
 
 说明：
 - 下载：**仅 1080p**（`height=1080` 的视频轨 + 音频，或单文件 1080p）。若当前环境下列不出 1080p 流，将报错退出，**不会**降级为 720p/360p。
@@ -17,10 +18,12 @@
 - 若下载仍慢：先 yt-dlp -U；再配合 cookies 常能缓解限速。
 - B 站投稿标题：默认在开头附加 YouTube 上传日期（M/D/YYYY，与站点元数据 upload_date 一致），再接原标题或 --title。
 - 上传成功后会轮询创作中心审核：若「已退回」且稿件问题中含【HH:MM:SS-HH:MM:SS】，则剪除对应片段并替换稿件后结束（不再轮询）。可用 --no-review-wait 关闭。环境变量见 bilibili_review.py。
+- 流水线最后一步会清理 **video_subs/** 下当前视频的中间文件（下载的 mp4、vtt、srt 等），**仅保留** `yt_<视频ID>_bilingual.mp4`；其它视频 ID 的文件不受影响。
 - 若链接含 &list=（播放列表），脚本已默认 noplaylist，只处理当前 watch?v= 视频；也可手动改成仅 https://www.youtube.com/watch?v=视频ID 。
 - 若使用 cookies 后出现「Requested format is not available」：cookie 已生效，但带登录态时需通过 YouTube 验证，本机须安装 Deno/Node 等（见 https://github.com/yt-dlp/yt-dlp/wiki/EJS ）。脚本会先带 cookie 下载，失败则自动去掉 cookie 重试。可选环境变量：YTDLP_DENO_PATH / YTDLP_NODE_PATH 指向 deno.exe、node.exe（未加入 PATH 时）。
 - 云服务器常见 IPv6 不通导致连接失败：默认启用 yt-dlp 的 force_ipv4（等同 --force-ipv4）。若需走 IPv6，设置环境变量 YTDLP_FORCE_IPV4=0。
 - 机房 IP / 新版 YouTube：默认 `player_client=android_vr`（多数环境下不要求 GVS PO Token；旧版 `android` 常需 PO Token，见 yt-dlp PO-Token-Guide）。可用环境变量 `YTDLP_YOUTUBE_PLAYER_CLIENT` 覆盖（如 `android,web`）；设为 `none` 则不用。仍 403 时请在服务器放置 **youtube_cookies.txt**（浏览器导出 Netscape）。
+- 断点续跑：`--from-step 2` 需已有 `yt_<ID>.mp4`（或 mkv/webm）与英文字幕 VTT；`3` 另需 `yt_<ID>.zh-Hans.vtt`；`4` 需已有 `yt_<ID>_bilingual.mp4`。仍会请求同一 URL 以解析视频 ID 与标题（不重复下载视频）。
 """
 
 from __future__ import annotations
@@ -111,6 +114,26 @@ def _resolve_downloaded_video(info: dict, video_id: str) -> Path:
     raise FileNotFoundError(f"未找到已下载视频文件（预期 yt_{video_id}.mp4 等）")
 
 
+def _zh_hans_vtt_path_from_en_vtt(en_vtt: Path) -> Path:
+    """与 translate_subs_to_zh_hans.translate_vtt_to_zh_hans 输出路径一致。"""
+    stem = en_vtt.stem
+    if stem.endswith(".en"):
+        base = en_vtt.parent / stem[:-3]
+    else:
+        base = en_vtt.parent / stem
+    return base.parent / (base.name + ".zh-Hans.vtt")
+
+
+def _find_local_video_for_id(video_id: str) -> Path:
+    for ext in ("mp4", "mkv", "webm"):
+        p = VIDEO_SUBS_DIR / f"yt_{video_id}.{ext}"
+        if p.is_file():
+            return p.resolve()
+    raise FileNotFoundError(
+        f"未找到本地视频 video_subs/yt_{video_id}.mp4（或 .mkv/.webm）。请先完成步骤 1。"
+    )
+
+
 def _find_en_vtt(video_id: str) -> Path:
     cands = sorted(VIDEO_SUBS_DIR.glob(f"yt_{video_id}*.vtt"))
     for p in cands:
@@ -127,6 +150,32 @@ def _find_en_vtt(video_id: str) -> Path:
     raise FileNotFoundError(
         f"未找到英文字幕 yt_{video_id}*.vtt。该视频可能没有英文字幕或未开放字幕。"
     )
+
+
+def _cleanup_video_subs_keep_bilingual_only(vid: str) -> None:
+    """删除 video_subs 下与当前视频 ID 相关的中间文件，仅保留 yt_{vid}_bilingual.mp4（不删其它视频前缀）。"""
+    keep_name = f"yt_{vid}_bilingual.mp4"
+    ensure_video_subs_dir()
+    removed: list[str] = []
+    for p in sorted(VIDEO_SUBS_DIR.glob(f"yt_{vid}*")):
+        if not p.is_file():
+            continue
+        if p.name == keep_name:
+            continue
+        try:
+            p.unlink()
+            removed.append(p.name)
+        except OSError as e:
+            print(f"  警告：无法删除 {p.name}: {e}", file=sys.stderr)
+    if removed:
+        if len(removed) <= 15:
+            print(f"  已删除中间文件（{len(removed)} 个）: {', '.join(removed)}")
+        else:
+            print(
+                f"  已删除中间文件（{len(removed)} 个）: {', '.join(removed[:15])} …"
+            )
+    else:
+        print(f"  无其它 yt_{vid}* 文件需删除。")
 
 
 def _is_unavailable_format_error(e: BaseException) -> bool:
@@ -301,6 +350,63 @@ def download_youtube(
     return video_path, en_vtt, vid, title, date_label
 
 
+def _youtube_extract_info_no_download(
+    url: str,
+    *,
+    cookies_file: str | None = None,
+    no_youtube_cookies: bool = False,
+) -> dict:
+    """仅拉取元数据，不下载视频/字幕（用于 --from-step 2/3/4）。"""
+    ensure_video_subs_dir()
+    cookie_path = None if no_youtube_cookies else _resolve_youtube_cookiefile(cookies_file)
+
+    base_opts: dict = {
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+    }
+    if (os.environ.get("YTDLP_FORCE_IPV4", "1").strip().lower() not in ("0", "false", "no")):
+        base_opts["force_ipv4"] = True
+    ex_args = _youtube_extractor_args()
+    if ex_args:
+        base_opts["extractor_args"] = ex_args
+    js_rt = _js_runtimes_from_env()
+    if js_rt:
+        base_opts["js_runtimes"] = js_rt
+
+    def _extract(with_cookie: bool):
+        opts = {**base_opts}
+        if with_cookie and cookie_path:
+            p = Path(cookie_path).expanduser().resolve()
+            if not p.is_file():
+                raise FileNotFoundError(f"找不到 YouTube cookies 文件: {p}")
+            opts["cookiefile"] = str(p)
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            return ydl.extract_info(url, download=False)
+
+    if cookie_path:
+        p = Path(cookie_path).expanduser().resolve()
+        if not p.is_file():
+            raise FileNotFoundError(f"找不到 YouTube cookies 文件: {p}")
+        try:
+            return _extract(True)
+        except DownloadError as e:
+            msg = str(e)
+            if "Only images are available" in msg or _is_unavailable_format_error(e):
+                print(
+                    "  提示：使用 cookies 时未能解析出元数据（常见于 YouTube 验证未通过、"
+                    "本机未配置 JS 运行环境）。将不使用 cookies 重试…"
+                )
+                try:
+                    return _extract(False)
+                except DownloadError as e2:
+                    raise
+            else:
+                raise
+    else:
+        return _extract(False)
+
+
 def run_pipeline(
     url: str,
     *,
@@ -309,49 +415,102 @@ def run_pipeline(
     cookies_file: str | None = None,
     no_youtube_cookies: bool = False,
     no_review_wait: bool = False,
+    from_step: int = 1,
 ) -> Path:
+    # 最后一步：清理 video_subs 内本视频中间文件，仅保留 yt_{vid}_bilingual.mp4
     total_steps = (
-        5
+        6
         if (not no_upload and not no_review_wait)
-        else (3 if no_upload else 4)
+        else (4 if no_upload else 5)
     )
-    print(f"步骤 1/{total_steps}：下载 YouTube 视频与英文字幕…")
-    video_path, en_vtt, vid, yt_title, yt_date_label = download_youtube(
-        url,
-        cookies_file=cookies_file,
-        no_youtube_cookies=no_youtube_cookies,
-    )
-    print(f"  视频: {video_path}")
-    if yt_date_label:
-        print(f"  上传日期: {yt_date_label}（将用于 B 站标题前缀）")
-    print(f"  英文字幕: {en_vtt}")
 
-    print(f"步骤 2/{total_steps}：翻译为简体中文（可能较久）…")
-    zh_vtt = translate_vtt_to_zh_hans(en_vtt)
+    vid: str
+    yt_title: str
+    yt_date_label: str | None
+    video_path: Path | None = None
+    en_vtt: Path | None = None
+    zh_vtt: Path | None = None
+    out_bilingual: Path | None = None
 
-    print(f"步骤 3/{total_steps}：转为 SRT 并烧录双语画面字幕…")
-    en_srt = vtt_to_srt(en_vtt)
-    zh_srt = vtt_to_srt(zh_vtt)
-    out_bilingual = VIDEO_SUBS_DIR / f"yt_{vid}_bilingual.mp4"
-    cmd = [
-        sys.executable,
-        str(PROJECT_ROOT / "bilingual_subs_to_video.py"),
-        "--video",
-        str(video_path),
-        "--en",
-        str(en_srt),
-        "--zh",
-        str(zh_srt),
-        "-o",
-        str(out_bilingual),
-    ]
-    r = subprocess.run(cmd, cwd=str(PROJECT_ROOT))
-    if r.returncode != 0:
-        raise RuntimeError("烧录字幕失败（bilingual_subs_to_video.py 退出码非 0）")
-    print(f"  已生成: {out_bilingual}")
+    if from_step <= 1:
+        print(f"步骤 1/{total_steps}：下载 YouTube 视频与英文字幕…")
+        video_path, en_vtt, vid, yt_title, yt_date_label = download_youtube(
+            url,
+            cookies_file=cookies_file,
+            no_youtube_cookies=no_youtube_cookies,
+        )
+        print(f"  视频: {video_path}")
+        if yt_date_label:
+            print(f"  上传日期: {yt_date_label}（将用于 B 站标题前缀）")
+        print(f"  英文字幕: {en_vtt}")
+    else:
+        info = _youtube_extract_info_no_download(
+            url,
+            cookies_file=cookies_file,
+            no_youtube_cookies=no_youtube_cookies,
+        )
+        if not info:
+            raise RuntimeError("yt-dlp 未返回视频信息")
+        vid = str(info.get("id") or "")
+        if not vid:
+            raise RuntimeError("无法解析视频 ID")
+        yt_title = (info.get("title") or "video").strip()
+        yt_date_label = _youtube_upload_date_label(info)
+        if from_step <= 3:
+            video_path = _find_local_video_for_id(vid)
+            en_vtt = _find_en_vtt(vid)
+            print(f"  视频: {video_path}")
+            if yt_date_label:
+                print(f"  上传日期: {yt_date_label}（将用于 B 站标题前缀）")
+            print(f"  英文字幕: {en_vtt}")
+        if from_step == 4:
+            out_bilingual = VIDEO_SUBS_DIR / f"yt_{vid}_bilingual.mp4"
+            if not out_bilingual.is_file():
+                raise FileNotFoundError(
+                    f"未找到 {out_bilingual}，无法从步骤 4 继续。请先完成步骤 3。"
+                )
+        elif from_step == 3:
+            assert en_vtt is not None
+            zh_vtt = _zh_hans_vtt_path_from_en_vtt(en_vtt)
+            if not zh_vtt.is_file():
+                raise FileNotFoundError(
+                    f"未找到简体字幕 {zh_vtt}。请先完成步骤 2，或确认文件名与 translate_subs_to_zh_hans 输出一致。"
+                )
+
+    if from_step <= 2:
+        assert en_vtt is not None
+        print(f"步骤 2/{total_steps}：翻译为简体中文（可能较久）…")
+        zh_vtt = translate_vtt_to_zh_hans(en_vtt)
+
+    if from_step <= 3:
+        assert video_path is not None and en_vtt is not None and zh_vtt is not None
+        print(f"步骤 3/{total_steps}：转为 SRT 并烧录双语画面字幕…")
+        en_srt = vtt_to_srt(en_vtt)
+        zh_srt = vtt_to_srt(zh_vtt)
+        out_bilingual = VIDEO_SUBS_DIR / f"yt_{vid}_bilingual.mp4"
+        cmd = [
+            sys.executable,
+            str(PROJECT_ROOT / "bilingual_subs_to_video.py"),
+            "--video",
+            str(video_path),
+            "--en",
+            str(en_srt),
+            "--zh",
+            str(zh_srt),
+            "-o",
+            str(out_bilingual),
+        ]
+        r = subprocess.run(cmd, cwd=str(PROJECT_ROOT))
+        if r.returncode != 0:
+            raise RuntimeError("烧录字幕失败（bilingual_subs_to_video.py 退出码非 0）")
+        print(f"  已生成: {out_bilingual}")
+    else:
+        assert out_bilingual is not None and out_bilingual.is_file()
 
     if no_upload:
         print("已跳过上传（--no-upload）。")
+        print(f"步骤 {total_steps}/{total_steps}：清理 video_subs（仅保留双语成片）…")
+        _cleanup_video_subs_keep_bilingual_only(vid)
         return out_bilingual
 
     review_after = not no_review_wait
@@ -378,10 +537,12 @@ def run_pipeline(
         bvid = result.get("bvid")
         if not bvid:
             raise RuntimeError("上传返回结果中缺少 bvid，无法轮询审核。")
-        print("步骤 5/5：轮询审核状态（退回则按时间轴剪片并替换稿件）…")
+        print(f"步骤 5/{total_steps}：轮询审核状态（退回则按时间轴剪片并替换稿件）…")
         from bilibili_review import run_review_flow_sync
 
         run_review_flow_sync(bvid, out_bilingual)
+    print(f"步骤 {total_steps}/{total_steps}：清理 video_subs（仅保留双语成片）…")
+    _cleanup_video_subs_keep_bilingual_only(vid)
     return out_bilingual
 
 
@@ -415,6 +576,14 @@ def main() -> None:
         action="store_true",
         help="上传成功后不轮询审核、不自动按退回剪片替换",
     )
+    ap.add_argument(
+        "--from-step",
+        type=int,
+        default=1,
+        choices=[1, 2, 3, 4],
+        metavar="N",
+        help="从第 N 步开始：1=下载（默认）2=翻译 3=烧录 4=上传；2–4 需同一 URL 且 video_subs 内已有对应中间文件",
+    )
     args = ap.parse_args()
     try:
         run_pipeline(
@@ -424,6 +593,7 @@ def main() -> None:
             cookies_file=args.cookies,
             no_youtube_cookies=args.no_youtube_cookies,
             no_review_wait=args.no_review_wait,
+            from_step=args.from_step,
         )
     except (RuntimeError, FileNotFoundError, DownloadError, TimeoutError) as e:
         print(f"错误: {e}", file=sys.stderr)
