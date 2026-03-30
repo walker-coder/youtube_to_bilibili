@@ -12,6 +12,7 @@
   退回时会在终端输出「哔哩哔哩审核内容」（整理自 archive 与优先字段；过长截断）。
   退回时**必定**将 upload_args 与 page_state 的完整 JSON 写入 logs/bilibili_review_api_<BV>_<时间>.json，便于对照网页扩展正则。
   BILIBILI_REVIEW_PRINT_FULL_JSON=1 时同时将完整 JSON 打印到终端（体积大）。
+  BILIBILI_REVIEW_RECUT_PAD_SEC  对解析出的每段删除区间左右各扩展的秒数（默认 1.0）；设为 0 关闭。
 
 单独补跑（已上传过、未走流水线步骤 5 时）：
   python bilibili_review.py BV1DhX1BVESJ
@@ -108,6 +109,27 @@ def _merge_ranges(ranges: list[tuple[float, float]]) -> list[tuple[float, float]
         else:
             out[-1] = (out[-1][0], max(out[-1][1], b))
     return out
+
+
+def _expand_remove_ranges_with_padding(
+    ranges: list[tuple[float, float]],
+    *,
+    pad_sec: float,
+    duration_sec: float,
+) -> list[tuple[float, float]]:
+    """
+    对每段删除区间左右各扩展 pad_sec 秒（应对退回里时间过短），再合并重叠，并限制在 [0, duration_sec]。
+    """
+    merged = _merge_ranges(ranges)
+    if pad_sec <= 0:
+        return merged
+    padded: list[tuple[float, float]] = []
+    for a, b in merged:
+        a2 = max(0.0, a - pad_sec)
+        b2 = min(float(duration_sec), b + pad_sec)
+        if b2 > a2:
+            padded.append((a2, b2))
+    return _merge_ranges(padded)
 
 
 def _format_seconds_as_hms(seconds: float) -> str:
@@ -873,21 +895,45 @@ async def poll_and_repair_rejected(
                         "从/至/到、纯秒区间带「秒」字等）。请对照上方终端预览与日志文件；"
                         "把「嵌套字段节选」或合并字符串里含时间的片段发开发者即可扩展正则。"
                     )
-                merged = _merge_ranges(ranges)
+                merged_in = _merge_ranges(ranges)
+                dur = _ffprobe_duration(current)
+                try:
+                    pad = float(
+                        os.environ.get("BILIBILI_REVIEW_RECUT_PAD_SEC", "1.0").strip()
+                        or "0"
+                    )
+                except ValueError:
+                    pad = 1.0
+                ranges_for_cut = _expand_remove_ranges_with_padding(
+                    merged_in,
+                    pad_sec=pad,
+                    duration_sec=dur,
+                )
                 parts = [
                     f"{_format_seconds_as_hms(a)}–{_format_seconds_as_hms(b)}"
-                    for a, b in ranges
+                    for a, b in merged_in
                 ]
                 print(
-                    f"  从退回说明解析到 {len(ranges)} 个需删除区间: "
+                    f"  从退回说明解析到 {len(merged_in)} 段需删除区间（合并后）: "
                     + "；".join(parts)
                 )
-                if len(merged) != len(ranges):
+                if len(merged_in) != len(ranges):
                     print(
-                        f"  （区间有重叠或相邻，合并为 {len(merged)} 段后剪除）"
+                        f"  （原始解析 {len(ranges)} 段，重叠/相邻合并为 {len(merged_in)} 段）"
                     )
+                if pad > 0 and ranges_for_cut:
+                    parts_cut = [
+                        f"{_format_seconds_as_hms(a)}–{_format_seconds_as_hms(b)}"
+                        for a, b in ranges_for_cut
+                    ]
+                    print(
+                        f"  每段左右各扩展 {pad:g}s 后实际剪除（共 {len(ranges_for_cut)} 段）: "
+                        + "；".join(parts_cut)
+                    )
+                elif pad <= 0:
+                    print("  （BILIBILI_REVIEW_RECUT_PAD_SEC=0，未做左右扩展）")
                 out = current.with_name(current.stem + "_recut.mp4")
-                ffmpeg_remove_time_ranges(current, out, ranges)
+                ffmpeg_remove_time_ranges(current, out, ranges_for_cut)
                 print(f"  已剪除指定片段，输出: {out}")
                 if current.resolve() != original_bilingual.resolve():
                     try:
