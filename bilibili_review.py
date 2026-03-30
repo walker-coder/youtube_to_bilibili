@@ -7,7 +7,7 @@
   BILIBILI_REVIEW_POLL_INTERVAL_SEC  轮询间隔秒数，默认 30
   BILIBILI_REVIEW_MAX_WAIT_SEC       每一轮（从轮询到通过/退回/超时）最长等待秒数，默认 7200；替换后会开启新一轮轮询
   BILIBILI_REVIEW_MAX_REPLACE_ROUNDS  最多剪片替换次数（含多轮退回），默认 20，防止无限循环
-  BILIBILI_REVIEW_DUMP_REJECT_TEXT=1  若退回但解析不到时间轴，将 API 合并原文写入 logs/bilibili_reject_raw_<BV>_<时间>.txt 便于核对格式
+  解析不到时间段时：终端会打印接口摘要（顶层键、可能含退回说明的嵌套字段节选、合并 JSON 的首尾截断），并写入 logs/bilibili_reject_raw_<BV>_<时间>.txt 全文
 
 单独补跑（已上传过、未走流水线步骤 5 时）：
   python bilibili_review.py BV1DhX1BVESJ
@@ -196,9 +196,14 @@ def ffmpeg_remove_time_ranges(input_path: Path, output_path: Path, ranges: list[
 def extract_time_ranges_from_text(text: str) -> list[tuple[float, float]]:
     """
     从退回说明 / API JSON 文本中提取「需删除」时间段（秒）。
-    支持：【HH:MM:SS-HH:MM:SS】、半角 []、无括号、全角冒号、多种破折号、MM:SS-MM:SS（无小时）等。
+    支持：【HH:MM:SS-HH:MM:SS】、半角 []、无括号、全角冒号、多种破折号、MM:SS、
+    可选毫秒、从…到/至、纯「秒」区间、HTML 标签内的文案等。
     """
-    t = text.replace("\uFF1A", ":").replace("：", ":")
+    # 创作中心文案里偶见 <br>；折行可能导致「时刻-时刻」被拆开，先规整
+    t = re.sub(r"<[^>]+>", " ", text)
+    t = t.replace("\uFF1A", ":").replace("：", ":")
+    t = re.sub(r"\s+", " ", t)
+
     out: list[tuple[float, float]] = []
     seen: set[tuple[float, float]] = set()
 
@@ -214,29 +219,58 @@ def extract_time_ranges_from_text(text: str) -> list[tuple[float, float]]:
         except (ValueError, IndexError, OSError):
             return
 
-    patterns = [
-        # 【01:29:19-01:31:06】
-        re.compile(
-            rf"[【\[](\d{{1,2}}:\d{{2}}:\d{{2}}){_DASH}(\d{{1,2}}:\d{{2}}:\d{{2}})[】\]]"
-        ),
+    def add_seconds_pair(a: str, b: str) -> None:
+        try:
+            sa, sb = float(a.strip()), float(b.strip())
+            if sb <= sa or sa < 0:
+                return
+            key = (round(sa, 3), round(sb, 3))
+            if key not in seen:
+                seen.add(key)
+                out.append((sa, sb))
+        except (ValueError, TypeError):
+            return
+
+    # 时:分:秒 可带小数秒；分:秒 可带小数
+    HMS = r"\d{1,2}:\d{2}:\d{2}(?:\.\d+)?"
+    MMSS = r"\d{1,2}:\d{2}(?:\.\d+)?"
+    # 连接符含全角横线、波浪线（与 _DASH 一致）
+    conn = _DASH
+
+    patterns: list[re.Pattern[str]] = [
+        # 【01:29:19-01:31:06】、带毫秒
+        re.compile(rf"[【\[]({HMS}){conn}({HMS})[】\]]"),
         # 正文里无括号，两段完整时刻
-        re.compile(
-            rf"(\d{{1,2}}:\d{{2}}:\d{{2}})\s*{_DASH}\s*(\d{{1,2}}:\d{{2}}:\d{{2}})"
-        ),
+        re.compile(rf"({HMS})\s*{conn}\s*({HMS})"),
         # 仅 分:秒（短片段）
-        re.compile(rf"[【\[](\d{{1,2}}:\d{{2}}){_DASH}(\d{{1,2}}:\d{{2}})[】\]]"),
+        re.compile(rf"[【\[]({MMSS}){conn}({MMSS})[】\]]"),
         re.compile(
-            rf"(?<![\d:])(\d{{1,2}}:\d{{2}})\s*{_DASH}\s*(\d{{1,2}}:\d{{2}})(?![\d:])"
+            rf"(?<![\d:])({MMSS})\s*{conn}\s*({MMSS})(?![\d:])"
         ),
-        # 01:29:19 至 01:31:06
-        re.compile(
-            rf"(\d{{1,2}}:\d{{2}}:\d{{2}})\s*至\s*(\d{{1,2}}:\d{{2}}:\d{{2}})"
-        ),
-        re.compile(rf"(\d{{1,2}}:\d{{2}})\s*至\s*(\d{{1,2}}:\d{{2}})"),
+        # 01:29:19 至 / 到 01:31:06
+        re.compile(rf"({HMS})\s*至\s*({HMS})"),
+        re.compile(rf"({HMS})\s*到\s*({HMS})"),
+        re.compile(rf"({MMSS})\s*至\s*({MMSS})"),
+        re.compile(rf"({MMSS})\s*到\s*({MMSS})"),
+        # 从 01:29:19 到 01:31:06
+        re.compile(rf"(?:从|自)\s*({HMS})\s*(?:到|至)\s*({HMS})"),
+        re.compile(rf"(?:从|自)\s*({MMSS})\s*(?:到|至)\s*({MMSS})"),
+        # 中间点号连接（少数模板）
+        re.compile(rf"({HMS})\s*[·•]\s*({HMS})"),
     ]
     for pat in patterns:
         for m in pat.finditer(t):
             add_pair(m.group(1), m.group(2))
+
+    # 纯秒数区间（须带「秒」字，避免误匹配 JSON 里其它数字）
+    sec_patterns = [
+        re.compile(rf"(\d+(?:\.\d+)?)\s*秒\s*{conn}\s*(\d+(?:\.\d+)?)\s*秒"),
+        re.compile(rf"(\d+(?:\.\d+)?)\s*秒\s*至\s*(\d+(?:\.\d+)?)\s*秒"),
+        re.compile(rf"(\d+(?:\.\d+)?)\s*秒\s*到\s*(\d+(?:\.\d+)?)\s*秒"),
+    ]
+    for pat in sec_patterns:
+        for m in pat.finditer(t):
+            add_seconds_pair(m.group(1), m.group(2))
 
     return out
 
@@ -246,6 +280,97 @@ def _review_text_blob(archive_json: dict, page_state: dict | None) -> str:
     if page_state is not None:
         parts.append(json.dumps(page_state, ensure_ascii=False))
     return "\n".join(parts)
+
+
+def _write_reject_debug_text(bvid: str, text: str) -> Path:
+    """解析不到时间段时写出接口合并文本，便于对照创作中心改正则。"""
+    from paths_config import PROJECT_ROOT
+
+    log_dir = PROJECT_ROOT / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fp = log_dir / f"bilibili_reject_raw_{bvid}_{stamp}.txt"
+    fp.write_text(text, encoding="utf-8")
+    return fp
+
+
+def _might_contain_time_hint(s: str) -> bool:
+    if not s or not isinstance(s, str):
+        return False
+    return bool(
+        re.search(r"\d{1,2}\s*[:：]\s*\d{2}", s)
+        or "秒" in s
+        or "退回" in s
+        or "问题" in s
+        or "删除" in s
+        or "片段" in s
+    )
+
+
+def _gather_nested_string_fields(obj, out: list[str], prefix: str = "", depth: int = 0) -> None:
+    """收集嵌套 JSON 里可能含退回说明/时间轴的字符串，便于终端展示。"""
+    if depth > 14 or len(out) >= 40:
+        return
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            p = f"{prefix}.{k}" if prefix else str(k)
+            if isinstance(v, str) and _might_contain_time_hint(v):
+                snippet = v.strip().replace("\n", " ")
+                if len(snippet) > 800:
+                    snippet = snippet[:800] + "…"
+                out.append(f"  {p}: {snippet}")
+            else:
+                _gather_nested_string_fields(v, out, p, depth + 1)
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj[:30]):
+            _gather_nested_string_fields(v, out, f"{prefix}[{i}]", depth + 1)
+
+
+def _print_reject_response_preview(
+    bvid: str,
+    archive_json: dict,
+    page_state: dict | None,
+    blob: str,
+) -> None:
+    """
+    解析时间段失败时打印 B 站返回摘要，便于对照创作中心或把终端片段发给他人扩展正则。
+    """
+    head_n, tail_n = 4500, 4500
+    print()
+    print("=" * 72)
+    print(f"【退回说明 · 接口预览】 稿件 {bvid}")
+    print(f"合并文本总长度: {len(blob)} 字符（完整内容已写入 logs 下 txt）")
+    arc = archive_json.get("archive")
+    if isinstance(arc, dict):
+        st = arc.get("state")
+        print(f"archive.state（若存在）: {st!r}")
+    # 优先列出常见顶层键，便于判断结构是否变化
+    print(f"archive_json 顶层键: {list(archive_json.keys())}")
+    if page_state is not None and isinstance(page_state, dict):
+        print(f"page_state 顶层键: {list(page_state.keys())[:30]}{'…' if len(page_state) > 30 else ''}")
+
+    nested: list[str] = []
+    _gather_nested_string_fields(archive_json, nested, "archive_json", 0)
+    if page_state is not None:
+        _gather_nested_string_fields(page_state, nested, "page_state", 0)
+    if nested:
+        print("\n--- 嵌套字段中可能含时间/退回说明的字符串（节选）---")
+        for line in nested[:25]:
+            print(line)
+        if len(nested) > 25:
+            print(f"  … 共 {len(nested)} 条匹配，其余见完整日志文件 …")
+
+    print("\n--- 合并 JSON 字符串（首尾截断，用于搜时间格式）---")
+    if len(blob) <= head_n + tail_n + 120:
+        print(blob)
+    else:
+        print(blob[:head_n])
+        print(
+            f"\n... （中间省略 {len(blob) - head_n - tail_n} 字符；完整见 logs/bilibili_reject_raw_*.txt）...\n"
+        )
+        print(blob[-tail_n:])
+    print("=" * 72)
+    print()
 
 
 def classify_review(archive_json: dict, page_state: dict | None) -> str:
@@ -455,20 +580,15 @@ async def poll_and_repair_rejected(
                 print("  哔哩哔哩审核：已退回，解析需删除的时间段…")
                 ranges = extract_time_ranges_from_text(text)
                 if not ranges:
-                    dump = (os.environ.get("BILIBILI_REVIEW_DUMP_REJECT_TEXT") or "").strip().lower()
-                    if dump in ("1", "true", "yes", "on", "y"):
-                        from paths_config import PROJECT_ROOT
-
-                        log_dir = PROJECT_ROOT / "logs"
-                        log_dir.mkdir(parents=True, exist_ok=True)
-                        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        fp = log_dir / f"bilibili_reject_raw_{bvid}_{stamp}.txt"
-                        fp.write_text(text, encoding="utf-8")
-                        print(f"  已写出退回相关 API 原文（便于核对时间格式）: {fp}")
+                    _print_reject_response_preview(
+                        bvid, archive_json, page_state, text
+                    )
+                    fp = _write_reject_debug_text(bvid, text)
+                    print(f"  未解析到时间段，完整接口原文已写入: {fp}")
                     raise RuntimeError(
-                        "退回稿件中未解析到可识别的起止时间（支持【HH:MM:SS-HH:MM:SS】、无括号两段时刻、"
-                        "「至」连接、MM:SS 等）。请上创作中心查看审核说明；需要看接口原文时可设 "
-                        "BILIBILI_REVIEW_DUMP_REJECT_TEXT=1 后重跑，在 logs/ 下查看 bilibili_reject_raw_*.txt。"
+                        "退回稿件中未解析到可识别的起止时间（已支持【HH:MM:SS-HH:MM:SS】、毫秒、"
+                        "从/至/到、纯秒区间带「秒」字等）。请对照上方终端预览与日志文件；"
+                        "把「嵌套字段节选」或合并字符串里含时间的片段发开发者即可扩展正则。"
                     )
                 out = current.with_name(current.stem + "_recut.mp4")
                 ffmpeg_remove_time_ranges(current, out, ranges)
