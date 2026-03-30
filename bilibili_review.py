@@ -196,8 +196,9 @@ def ffmpeg_remove_time_ranges(input_path: Path, output_path: Path, ranges: list[
 def extract_time_ranges_from_text(text: str) -> list[tuple[float, float]]:
     """
     从退回说明 / API JSON 文本中提取「需删除」时间段（秒）。
-    支持：【HH:MM:SS-HH:MM:SS】、半角 []、无括号、全角冒号、多种破折号、MM:SS、
-    可选毫秒、从…到/至、纯「秒」区间、HTML 标签内的文案等。
+    支持：【HH:MM:SS-HH:MM:SS】、B 站常见 **P1(01:26:33-01:27:10)**（分 P + 圆括号）、
+    半角 []、无括号、全角冒号、多种破折号、MM:SS、可选毫秒、从…到/至、纯「秒」区间、HTML 等。
+    若起止时刻相同（如 P1(01:26:33-01:26:33)），按剪除 1 秒处理。
     """
     # 创作中心文案里偶见 <br>；折行可能导致「时刻-时刻」被拆开，先规整
     t = re.sub(r"<[^>]+>", " ", text)
@@ -211,7 +212,8 @@ def extract_time_ranges_from_text(text: str) -> list[tuple[float, float]]:
         try:
             sa, sb = _parse_time_token(a), _parse_time_token(b)
             if sb <= sa:
-                return
+                # B 站退回里常见 P1(01:26:33-01:26:33) 起止相同，按该时刻起 1 秒剪除
+                sb = sa + 1.0
             key = (round(sa, 3), round(sb, 3))
             if key not in seen:
                 seen.add(key)
@@ -238,6 +240,8 @@ def extract_time_ranges_from_text(text: str) -> list[tuple[float, float]]:
     conn = _DASH
 
     patterns: list[re.Pattern[str]] = [
+        # 您的视频【P1(01:26:33-01:27:10)】【内容】… — 分 P + 半角圆括号包裹
+        re.compile(rf"P\d+\(\s*({HMS})\s*{conn}\s*({HMS})\s*\)"),
         # 【01:29:19-01:31:06】、带毫秒
         re.compile(rf"[【\[]({HMS}){conn}({HMS})[】\]]"),
         # 正文里无括号，两段完整时刻
