@@ -1,31 +1,29 @@
 """
-定时任务：查询「今天上传」的 The China Show（Bloomberg 搜索），对尚未处理过的视频调用 youtube_to_bilibili.run_pipeline。
+定时任务：查询「今天上传」的 The China Show（Bloomberg 搜索），对匹配到的视频调用 youtube_to_bilibili.run_pipeline。
 
-去重：项目根目录 china_show_processed_video_ids.json 记录已成功的 YouTube 视频 ID，不会重复投稿。
+去重：仅 logs/china_show_daily_YYYYMMDD.log —— 任一流水线**成功结束**后写入；存在则当日后续 cron 直接跳过（省 yt 搜索与负载）。
+若同一天还要再跑，请用 --force 或删除当日 log，或使用 --no-daily-log。
 
-启动时若 logs 下已有当日文件 china_show_daily_YYYYMMDD.log（本轮待处理视频全部成功跑完流水线后写入），则直接退出；加 --force 可忽略该检查。
-
-依赖与 youtube_to_bilibili 相同；建议在视频上线后每日运行一次。
+依赖与 youtube_to_bilibili 相同。
 
 Windows 任务计划程序示例（每天 18:30）:
   程序: python
   参数: D:\\path\\to\\bloombreg\\china_show_daily_to_bilibili.py
   起始于: D:\\path\\to\\bloombreg
 
-Linux cron 示例:
-  30 18 * * * cd /path/to/bloombreg && /path/to/python china_show_daily_to_bilibili.py >> logs/china_show_cron.log 2>&1
+Linux cron 示例（工作日每 10 分钟）:
+  */10 * * * 1-5 cd /path/to/bloombreg && /usr/bin/python3 china_show_daily_to_bilibili.py >> logs/china_show_cron.log 2>&1
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import signal
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from paths_config import LOGS_DIR, PROJECT_ROOT, ensure_logs_dir
+from paths_config import LOGS_DIR, ensure_logs_dir
 
 from download_bloomberg_china_show import (
     SEARCH_COUNT,
@@ -35,50 +33,28 @@ from download_bloomberg_china_show import (
 )
 from youtube_to_bilibili import run_pipeline
 
-PROCESSED_IDS_FILE = PROJECT_ROOT / "china_show_processed_video_ids.json"
-
 DAILY_LOG_PREFIX = "china_show_daily_"
 DAILY_LOG_SUFFIX = ".log"
 
 
-def today_daily_log_path(d: date | None = None) -> Path:
+def daily_success_log_path(d: date | None = None) -> Path:
+    """当日流水线已成功跑过至少一次的标记（与 download_bloomberg 的 china_show_*.log 区分命名）。"""
     day = d or date.today()
     return LOGS_DIR / f"{DAILY_LOG_PREFIX}{day.strftime('%Y%m%d')}{DAILY_LOG_SUFFIX}"
 
 
 def already_ran_daily_success() -> bool:
     ensure_logs_dir()
-    return today_daily_log_path().exists()
+    return daily_success_log_path().exists()
 
 
-def _write_daily_success_log() -> None:
+def _write_daily_success_log(note: str = "") -> None:
     ensure_logs_dir()
-    p = today_daily_log_path()
-    p.write_text(
-        f"completed_at={datetime.now().isoformat(timespec='seconds')}\n",
-        encoding="utf-8",
-    )
-
-
-def _load_processed_ids(path: Path) -> set[str]:
-    if not path.is_file():
-        return set()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return set()
-    if isinstance(data, list):
-        return {str(x).strip() for x in data if x}
-    if isinstance(data, dict) and "video_ids" in data:
-        return {str(x).strip() for x in data["video_ids"] if x}
-    return set()
-
-
-def _save_processed_ids(path: Path, ids: set[str]) -> None:
-    path.write_text(
-        json.dumps(sorted(ids), ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    p = daily_success_log_path()
+    line = f"completed_at={datetime.now().isoformat(timespec='seconds')}"
+    if note:
+        line += f" {note}"
+    p.write_text(line + "\n", encoding="utf-8")
 
 
 def _video_id(entry: dict) -> str | None:
@@ -91,12 +67,12 @@ def _video_id(entry: dict) -> str | None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="今日 China Show → youtube_to_bilibili（按视频 ID 去重）"
+        description="今日 China Show → youtube_to_bilibili（可选 china_show_daily 日志去重）"
     )
     ap.add_argument(
         "--dry-run",
         action="store_true",
-        help="只打印将处理的 URL，不调用流水线、不写出去重文件",
+        help="只打印将处理的 URL，不调用流水线、不写 daily log",
     )
     ap.add_argument(
         "--search-count",
@@ -123,22 +99,22 @@ def main() -> None:
         help="上传后不轮询审核",
     )
     ap.add_argument(
-        "--state-file",
-        type=Path,
-        default=PROCESSED_IDS_FILE,
-        help=f"去重 JSON 路径（默认 {PROCESSED_IDS_FILE.name}）",
-    )
-    ap.add_argument(
         "--force",
         action="store_true",
-        help="忽略 logs 下当日 china_show_daily_YYYYMMDD.log 已存在时的退出",
+        help="忽略 logs 下当日 china_show_daily_YYYYMMDD.log",
+    )
+    ap.add_argument(
+        "--no-daily-log",
+        action="store_true",
+        help="不写入、不检测 china_show_daily_YYYYMMDD.log（每次匹配到的今日视频都会跑流水线）",
     )
     args = ap.parse_args()
 
-    if not args.force and not args.dry_run and already_ran_daily_success():
-        p = today_daily_log_path()
+    if not args.no_daily_log and not args.force and already_ran_daily_success():
+        p = daily_success_log_path()
         print(
-            f"今日已成功跑过本脚本（存在 {p}），跳过。需要重跑请加 --force"
+            f"今日 china_show_daily 已成功跑过（存在 {p}），跳过。"
+            " 若仍需跑请用 --force 或删除该文件。"
         )
         sys.exit(0)
 
@@ -156,7 +132,6 @@ def main() -> None:
         print(f"搜索前 {args.search_count} 条中，无 upload_date 为 {dates} 的视频，退出。")
         sys.exit(0)
 
-    processed = _load_processed_ids(args.state_file)
     pending: list[tuple[str, str, dict]] = []
     for e in today_entries:
         vid = _video_id(e)
@@ -164,19 +139,13 @@ def main() -> None:
         if not vid or not url:
             print(f"跳过无 ID/URL 的条目: {e.get('title', '')!r}")
             continue
-        if vid in processed:
-            print(f"已处理过，跳过: {vid} {e.get('title', '')!r}")
-            continue
         pending.append((vid, url, e))
 
     if not pending:
-        print("今日条目均已处理过，无需运行流水线。")
+        print("今日匹配条目中无有效 ID/URL，退出。")
         sys.exit(0)
 
-    print(
-        f"待处理 {len(pending)} 个视频（日期 {dates}）；"
-        f"状态文件: {args.state_file}"
-    )
+    print(f"待处理 {len(pending)} 个视频（日期 {dates}）。")
 
     if args.dry_run:
         for vid, url, e in pending:
@@ -190,7 +159,6 @@ def main() -> None:
         else None
     )
     try:
-        ok = 0
         for vid, url, e in pending:
             title = e.get("title") or ""
             print(f"\n>>> 开始流水线: {vid} | {title!r}\n")
@@ -207,13 +175,9 @@ def main() -> None:
             except Exception as ex:
                 print(f"错误: {vid} 流水线失败: {ex}", file=sys.stderr)
                 continue
-            processed.add(vid)
-            _save_processed_ids(args.state_file, processed)
-            print(f"已记录成功: {vid} -> {args.state_file}")
-            ok += 1
-        if ok == len(pending) and pending:
-            _write_daily_success_log()
-            print(f"\n当日全部待处理视频已成功，已写入: {today_daily_log_path()}")
+            if not args.no_daily_log:
+                _write_daily_success_log(note=f"video_id={vid}")
+                print(f"已写入当日完成标记: {daily_success_log_path()}")
     finally:
         signal.signal(signal.SIGINT, old_int)
         if old_term is not None:

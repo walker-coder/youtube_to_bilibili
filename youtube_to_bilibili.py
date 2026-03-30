@@ -19,7 +19,7 @@
 - 若下载仍慢：先 yt-dlp -U；再配合 cookies 常能缓解限速。
 - B 站投稿标题：默认会先去掉 YouTube 原标题末尾「| The China Show M/D/YYYY」（及可选尾随 |），再格式化为「清理后标题或 --title | YYYY/MM/DD」（YouTube upload_date）；无上传日期元数据时仅用标题。
 - 上传成功后会轮询创作中心审核：若「已退回」且稿件问题中含【HH:MM:SS-HH:MM:SS】，则剪除对应片段并替换稿件后结束（不再轮询）。可用 --no-review-wait 关闭。环境变量见 bilibili_review.py。
-- 流水线最后一步会清理 **video_subs/** 下当前视频的中间文件（下载的 mp4、vtt、srt 等），**仅保留** `yt_<视频ID>_bilingual.mp4`；其它视频 ID 的文件不受影响。随后会按修改时间删除早于 **VIDEO_SUBS_RETENTION_DAYS**（默认 7）天的文件，以节省磁盘。
+- 流水线最后一步会清理 **video_subs/** 下当前视频的中间文件（下载的 mp4、vtt、srt 等），**仅保留** `yt_<视频ID>_bilingual.mp4`；其它视频 ID 的文件不受影响。
 - 若链接含 &list=（播放列表），脚本已默认 noplaylist，只处理当前 watch?v= 视频；也可手动改成仅 https://www.youtube.com/watch?v=视频ID 。
 - 若使用 cookies 后出现「Requested format is not available」：cookie 已生效，但带登录态时需通过 YouTube 验证，本机须安装 Deno/Node 等（见 https://github.com/yt-dlp/yt-dlp/wiki/EJS ）。脚本会先带 cookie 下载，失败则自动去掉 cookie 重试。可选环境变量：YTDLP_DENO_PATH / YTDLP_NODE_PATH 指向 deno.exe、node.exe（未加入 PATH 时）。
 - 云服务器常见 IPv6 不通导致连接失败：默认启用 yt-dlp 的 force_ipv4（等同 --force-ipv4）。若需走 IPv6，设置环境变量 YTDLP_FORCE_IPV4=0。
@@ -35,7 +35,7 @@ import re
 import signal
 import subprocess
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import yt_dlp
@@ -203,44 +203,6 @@ def _cleanup_video_subs_keep_bilingual_only(vid: str) -> None:
             )
     else:
         print(f"  无其它 yt_{vid}* 文件需删除。")
-
-
-def _cleanup_video_subs_older_than_days() -> None:
-    """
-    删除 video_subs 下「修改时间」早于「当前时间减去 N 天」的文件（递归，仅文件）。
-    N 由环境变量 VIDEO_SUBS_RETENTION_DAYS 指定，默认 7；设为 0 或负数则跳过。
-    """
-    raw = os.environ.get("VIDEO_SUBS_RETENTION_DAYS", "7").strip()
-    try:
-        days = int(raw)
-    except ValueError:
-        days = 7
-    if days <= 0:
-        return
-    ensure_video_subs_dir()
-    cutoff = (datetime.now() - timedelta(days=days)).timestamp()
-    removed: list[str] = []
-    for p in VIDEO_SUBS_DIR.rglob("*"):
-        if not p.is_file():
-            continue
-        try:
-            if p.stat().st_mtime < cutoff:
-                p.unlink()
-                removed.append(p.name)
-        except OSError as e:
-            print(f"  警告：无法删除过期文件 {p}: {e}", file=sys.stderr)
-    if removed:
-        n = len(removed)
-        if n <= 12:
-            print(f"  已删除早于 {days} 天的文件（{n} 个）: {', '.join(removed)}")
-        else:
-            print(f"  已删除早于 {days} 天的文件（{n} 个）。")
-
-
-def _finalize_video_subs_cleanup(vid: str) -> None:
-    """当前视频仅保留双语成片后，再按保留策略清理过期文件。"""
-    _cleanup_video_subs_keep_bilingual_only(vid)
-    _cleanup_video_subs_older_than_days()
 
 
 def _is_unavailable_format_error(e: BaseException) -> bool:
@@ -598,7 +560,7 @@ def run_pipeline(
     if no_upload:
         print("已跳过上传（--no-upload）。")
         print(f"步骤 {total_steps}/{total_steps}：清理 video_subs（仅保留双语成片）…")
-        _finalize_video_subs_cleanup(vid)
+        _cleanup_video_subs_keep_bilingual_only(vid)
         return out_bilingual
 
     review_after = not no_review_wait
@@ -637,7 +599,7 @@ def run_pipeline(
 
         run_review_flow_sync(bvid, out_bilingual)
     print(f"步骤 {total_steps}/{total_steps}：清理 video_subs（仅保留双语成片）…")
-    _finalize_video_subs_cleanup(vid)
+    _cleanup_video_subs_keep_bilingual_only(vid)
     return out_bilingual
 
 
