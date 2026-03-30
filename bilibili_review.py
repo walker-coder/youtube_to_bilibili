@@ -7,7 +7,9 @@
   BILIBILI_REVIEW_POLL_INTERVAL_SEC  轮询间隔秒数，默认 30
   BILIBILI_REVIEW_MAX_WAIT_SEC       每一轮（从轮询到通过/退回/超时）最长等待秒数，默认 7200；替换后会开启新一轮轮询
   BILIBILI_REVIEW_MAX_REPLACE_ROUNDS  最多剪片替换次数（含多轮退回），默认 20，防止无限循环
-  解析不到时间段时：终端会打印接口摘要（顶层键、可能含退回说明的嵌套字段节选、合并 JSON 的首尾截断），并写入 logs/bilibili_reject_raw_<BV>_<时间>.txt 全文
+  解析不到时间段时：终端会打印接口摘要（顶层键、可能含退回说明的嵌套字段节选、合并 JSON 的首尾截断），并写入 logs/bilibili_reject_raw_<BV>_<时间>.txt 全文。
+  解析区间时优先从疑似退回正文字段提取，并对整段 JSON 使用 strict 匹配，避免裸「时:分:秒-时:分:秒」误命中无关字段（与网页不一致）。
+  退回时会在终端输出「哔哩哔哩审核内容」（整理自 archive 与优先字段；过长截断），完整接口仍见 logs/bilibili_reject_raw_*.txt。
 
 单独补跑（已上传过、未走流水线步骤 5 时）：
   python bilibili_review.py BV1DhX1BVESJ
@@ -204,13 +206,189 @@ def ffmpeg_remove_time_ranges(input_path: Path, output_path: Path, ranges: list[
         shutil.rmtree(tmpd, ignore_errors=True)
 
 
-def extract_time_ranges_from_text(text: str) -> list[tuple[float, float]]:
+def _reject_text_key_hint(k: str) -> bool:
+    """字段名是否像退回/审核说明（用于优先从接口里摘出与网页一致的文案）。"""
+    kl = str(k).lower()
+    for h in (
+        "reject",
+        "reason",
+        "remark",
+        "message",
+        "fail",
+        "audit",
+        "退回",
+        "意见",
+        "说明",
+        "违规",
+        "problem",
+        "violation",
+        "issue",
+        "审核",
+        "问题",
+    ):
+        if h.lower() in kl or h in str(k):
+            return True
+    return False
+
+
+def _value_looks_like_violation_notice(s: str) -> bool:
+    """正文是否像「违规时间点」类退回说明（避免把整段 JSON 当正文乱匹配）。"""
+    if not s or not isinstance(s, str) or len(s) < 8:
+        return False
+    if ("违规" in s or "退回" in s or "问题" in s or "片段" in s or "时间点" in s) and (
+        "P1(" in s or "【" in s or re.search(r"\d{1,2}:\d{2}:\d{2}", s)
+    ):
+        return True
+    if "P1(" in s and re.search(r"\d{1,2}:\d{2}:\d{2}", s):
+        return True
+    return False
+
+
+def _collect_priority_reject_text(
+    archive_json: dict, page_state: dict | None
+) -> str:
+    """
+    从接口 JSON 中优先抽出与创作中心网页相近的退回说明字符串（不整段 dump JSON）。
+    """
+    parts: list[str] = []
+    seen: set[str] = set()
+
+    def add(s: str) -> None:
+        s = (s or "").strip()
+        if len(s) < 5:
+            return
+        if s in seen:
+            return
+        seen.add(s)
+        parts.append(s)
+
+    def walk(obj, depth: int = 0) -> None:
+        if depth > 20:
+            return
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                prefer = _reject_text_key_hint(str(k))
+                if isinstance(v, str):
+                    if (prefer and _might_contain_time_hint(v)) or _value_looks_like_violation_notice(
+                        v
+                    ):
+                        add(v)
+                else:
+                    walk(v, depth + 1)
+        elif isinstance(obj, list):
+            for v in obj[:100]:
+                walk(v, depth + 1)
+
+    walk(archive_json, 0)
+    if page_state is not None:
+        walk(page_state, 0)
+    return "\n".join(parts)
+
+
+def _gather_strings_for_review_display(
+    obj, out: list[str], path: str = "", depth: int = 0
+) -> None:
+    """收集嵌套 JSON 中含审核/退回/违规等关键词的字符串，供终端展示。"""
+    if depth > 16 or len(out) >= 40:
+        return
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            p = f"{path}.{k}" if path else str(k)
+            if isinstance(v, str) and len(v) > 12:
+                if any(
+                    x in v
+                    for x in (
+                        "审核",
+                        "退回",
+                        "违规",
+                        "稿件",
+                        "锁定",
+                        "开放浏览",
+                        "未通过",
+                        "问题",
+                        "时间点",
+                    )
+                ):
+                    out.append(f"{p}: {v.strip()[:4000]}")
+            else:
+                _gather_strings_for_review_display(v, out, p, depth + 1)
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj[:50]):
+            _gather_strings_for_review_display(v, out, f"{path}[{i}]", depth + 1)
+
+
+def format_bilibili_review_content(
+    archive_json: dict, page_state: dict | None
+) -> str:
+    """将接口返回整理为可读多行文本（不含整段 JSON dump），供终端或日志。"""
+    lines: list[str] = []
+    arc = archive_json.get("archive")
+    if isinstance(arc, dict):
+        st = arc.get("state")
+        if st is not None:
+            lines.append(f"archive.state = {st!r}")
+        for k in (
+            "reject_reason",
+            "reject_reason_v2",
+            "reject_reason_str",
+            "reject_reason_web",
+            "reason",
+            "reject_message",
+            "message",
+            "audit_msg",
+            "audit_reason",
+        ):
+            v = arc.get(k)
+            if isinstance(v, str) and v.strip():
+                lines.append(f"archive.{k}:\n{v.strip()}")
+    pri = _collect_priority_reject_text(archive_json, page_state)
+    if pri.strip():
+        if lines:
+            lines.append("---")
+        lines.append("【退回说明（接口优先字段汇总）】")
+        lines.append(pri.strip())
+    if not lines:
+        nested: list[str] = []
+        _gather_strings_for_review_display(archive_json, nested, "archive_json", 0)
+        if page_state is not None:
+            _gather_strings_for_review_display(page_state, nested, "page_state", 0)
+        if nested:
+            lines.extend(nested[:30])
+    if not lines:
+        return (
+            "(未从接口中解析出可读的审核说明；请查看 logs/bilibili_reject_raw_*.txt）"
+        )
+    return "\n".join(lines)
+
+
+def print_bilibili_review_content(archive_json: dict, page_state: dict | None) -> None:
+    """在终端打印哔哩哔哩返回的可读审核内容（过长时截断）。"""
+    block = format_bilibili_review_content(archive_json, page_state)
+    print("  【哔哩哔哩审核内容】")
+    all_lines = block.splitlines()
+    max_lines = 120
+    for i, line in enumerate(all_lines):
+        if i >= max_lines:
+            print(
+                f"  … 共 {len(all_lines)} 行，此处仅展示前 {max_lines} 行；"
+                "完整接口见 logs/bilibili_reject_raw_*.txt"
+            )
+            break
+        print(f"  {line}")
+
+
+def extract_time_ranges_from_text(
+    text: str, *, strict: bool = False
+) -> list[tuple[float, float]]:
     """
     从退回说明 / API JSON 文本中提取「需删除」时间段（秒）。
     支持：【HH:MM:SS-HH:MM:SS】、B 站常见 **P1(01:26:33-01:27:10)**（分 P + 圆括号）、
     半角 []、无括号、全角冒号、多种破折号、MM:SS、可选毫秒、从…到/至、纯「秒」区间、HTML 等。
     若起止时刻相同（如 P1(01:26:33-01:26:33)），按剪除 1 秒处理。
     多条重叠或相邻区间（如多条 P1(01:26:32-01:26:33)、P1(01:26:32-01:26:34)）在返回前会合并为一条再剪除。
+
+    strict=True：不启用「正文里无括号的两段 HMS-HMS / 无括号 MM:SS-MM:SS」，避免对整段 json.dumps
+    误匹配到无关数字串（与网页展示的删除区间不一致）。
     """
     # 创作中心文案里偶见 <br>；折行可能导致「时刻-时刻」被拆开，先规整
     t = re.sub(r"<[^>]+>", " ", text)
@@ -256,7 +434,7 @@ def extract_time_ranges_from_text(text: str) -> list[tuple[float, float]]:
         re.compile(rf"P\d+\(\s*({HMS})\s*{conn}\s*({HMS})\s*\)"),
         # 【01:29:19-01:31:06】、带毫秒
         re.compile(rf"[【\[]({HMS}){conn}({HMS})[】\]]"),
-        # 正文里无括号，两段完整时刻
+        # 正文里无括号，两段完整时刻（整段 JSON 时易误匹配，strict 时跳过）
         re.compile(rf"({HMS})\s*{conn}\s*({HMS})"),
         # 仅 分:秒（短片段）
         re.compile(rf"[【\[]({MMSS}){conn}({MMSS})[】\]]"),
@@ -274,6 +452,10 @@ def extract_time_ranges_from_text(text: str) -> list[tuple[float, float]]:
         # 中间点号连接（少数模板）
         re.compile(rf"({HMS})\s*[·•]\s*({HMS})"),
     ]
+    if strict:
+        # 去掉索引 2、4：裸 HMS-HMS、裸 MM:SS-MM:SS
+        patterns = [p for i, p in enumerate(patterns) if i not in (2, 4)]
+
     for pat in patterns:
         for m in pat.finditer(t):
             add_pair(m.group(1), m.group(2))
@@ -289,6 +471,31 @@ def extract_time_ranges_from_text(text: str) -> list[tuple[float, float]]:
             add_seconds_pair(m.group(1), m.group(2))
 
     return _merge_ranges(out)
+
+
+def extract_time_ranges_for_review(
+    archive_json: dict, page_state: dict | None
+) -> tuple[list[tuple[float, float]], str]:
+    """
+    供轮询退回使用：优先从疑似退回正文字段用 strict 解析；再对整段接口文本 strict；最后宽松兜底。
+    返回 (区间列表, 说明字符串)。
+    """
+    priority = _collect_priority_reject_text(archive_json, page_state)
+    if priority.strip():
+        r = extract_time_ranges_from_text(priority, strict=True)
+        if r:
+            return r, "退回说明（接口优先字段，strict）"
+    blob = _review_text_blob(archive_json, page_state)
+    r = extract_time_ranges_from_text(blob, strict=True)
+    if r:
+        return r, "合并接口 JSON（strict；若与网页不一致请对照 logs 全文）"
+    r = extract_time_ranges_from_text(blob, strict=False)
+    if r:
+        return (
+            r,
+            "合并接口 JSON（宽松匹配，可能与网页不一致；请核对 logs/bilibili_reject_raw_*.txt）",
+        )
+    return [], "无"
 
 
 def _review_text_blob(archive_json: dict, page_state: dict | None) -> str:
@@ -592,11 +799,19 @@ async def poll_and_repair_rejected(
 
             if status == "passed":
                 print("  哔哩哔哩审核：已通过。")
+                arc = archive_json.get("archive")
+                if isinstance(arc, dict) and arc.get("state") is not None:
+                    print(f"  archive.state = {arc.get('state')!r}")
                 return
 
             if status == "rejected":
+                print_bilibili_review_content(archive_json, page_state)
                 print("  哔哩哔哩审核：已退回，解析需删除的时间段…")
-                ranges = extract_time_ranges_from_text(text)
+                ranges, range_source = extract_time_ranges_for_review(
+                    archive_json, page_state
+                )
+                if range_source != "无":
+                    print(f"  区间解析来源: {range_source}")
                 if not ranges:
                     _print_reject_response_preview(
                         bvid, archive_json, page_state, text
