@@ -1,5 +1,5 @@
 """
-投稿后轮询哔哩哔哩审核状态：若「已退回」则按时间轴剪片并替换稿件；**可再次退回**，则对最新本地成片重复解析→剪片→替换，直到「审核通过」或单轮超时或达到最大轮数。
+投稿后轮询哔哩哔哩审核状态：若「已退回」则按时间轴剪片并替换稿件；退回说明里若含**多段**时间，`extract_time_ranges_from_text` 会全部解析，`ffmpeg_remove_time_ranges` 一次剪除多段。**可再次退回**，则对最新本地成片重复解析→剪片→替换，直到「审核通过」或单轮超时或达到最大轮数。
 
 依赖 upload_bilibili 的 Cookie 配置、ffmpeg、与 bilibili-api。
 
@@ -106,6 +106,17 @@ def _merge_ranges(ranges: list[tuple[float, float]]) -> list[tuple[float, float]
     return out
 
 
+def _format_seconds_as_hms(seconds: float) -> str:
+    """终端展示用：秒 → 与退回说明相近的 H:MM:SS 或 M:SS。"""
+    t = max(0.0, float(seconds))
+    h = int(t // 3600)
+    m = int((t % 3600) // 60)
+    s = t - h * 3600 - m * 60
+    if h > 0:
+        return f"{h:d}:{m:02d}:{s:06.3f}".rstrip("0").rstrip(".")
+    return f"{m:d}:{s:06.3f}".rstrip("0").rstrip(".")
+
+
 def ffmpeg_remove_time_ranges(input_path: Path, output_path: Path, ranges: list[tuple[float, float]]) -> None:
     """删除视频中若干时间段（秒），保留其余部分；多段用 concat demuxer。"""
     merged = _merge_ranges(ranges)
@@ -199,6 +210,7 @@ def extract_time_ranges_from_text(text: str) -> list[tuple[float, float]]:
     支持：【HH:MM:SS-HH:MM:SS】、B 站常见 **P1(01:26:33-01:27:10)**（分 P + 圆括号）、
     半角 []、无括号、全角冒号、多种破折号、MM:SS、可选毫秒、从…到/至、纯「秒」区间、HTML 等。
     若起止时刻相同（如 P1(01:26:33-01:26:33)），按剪除 1 秒处理。
+    多条重叠或相邻区间（如多条 P1(01:26:32-01:26:33)、P1(01:26:32-01:26:34)）在返回前会合并为一条再剪除。
     """
     # 创作中心文案里偶见 <br>；折行可能导致「时刻-时刻」被拆开，先规整
     t = re.sub(r"<[^>]+>", " ", text)
@@ -276,7 +288,7 @@ def extract_time_ranges_from_text(text: str) -> list[tuple[float, float]]:
         for m in pat.finditer(t):
             add_seconds_pair(m.group(1), m.group(2))
 
-    return out
+    return _merge_ranges(out)
 
 
 def _review_text_blob(archive_json: dict, page_state: dict | None) -> str:
@@ -533,6 +545,7 @@ async def poll_and_repair_rejected(
     """
     轮询至通过；若退回则剪片替换，并可能对替换后的稿件再次轮询（多轮退回直到通过或达上限）。
     每轮剪片输入为「当前线上稿件对应的本地文件」：首次为 bilingual_mp4，之后为上一轮生成的 *_recut.mp4。
+    每轮成功写出新的 *_recut.mp4 后，会删除上一轮的中间 recut 文件（保留最初的 *_bilingual.mp4）。
     """
     from upload_bilibili import _load_local_env
 
@@ -549,7 +562,8 @@ async def poll_and_repair_rejected(
         max_rounds = 1
 
     loop = asyncio.get_running_loop()
-    current: Path = Path(bilingual_mp4).resolve()
+    original_bilingual: Path = Path(bilingual_mp4).resolve()
+    current: Path = original_bilingual
 
     round_idx = 0
     while True:
@@ -594,9 +608,28 @@ async def poll_and_repair_rejected(
                         "从/至/到、纯秒区间带「秒」字等）。请对照上方终端预览与日志文件；"
                         "把「嵌套字段节选」或合并字符串里含时间的片段发开发者即可扩展正则。"
                     )
+                merged = _merge_ranges(ranges)
+                parts = [
+                    f"{_format_seconds_as_hms(a)}–{_format_seconds_as_hms(b)}"
+                    for a, b in ranges
+                ]
+                print(
+                    f"  从退回说明解析到 {len(ranges)} 个需删除区间: "
+                    + "；".join(parts)
+                )
+                if len(merged) != len(ranges):
+                    print(
+                        f"  （区间有重叠或相邻，合并为 {len(merged)} 段后剪除）"
+                    )
                 out = current.with_name(current.stem + "_recut.mp4")
                 ffmpeg_remove_time_ranges(current, out, ranges)
                 print(f"  已剪除指定片段，输出: {out}")
+                if current.resolve() != original_bilingual.resolve():
+                    try:
+                        current.unlink()
+                        print(f"  已删除上一轮中间文件: {current.name}")
+                    except OSError as e:
+                        print(f"  警告: 删除中间文件失败（可手动删）: {current} — {e}")
                 print("  正在替换稿件视频并重新提交…")
                 await _replace_video_edit(bvid, out, credential)
                 current = out
