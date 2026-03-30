@@ -1,6 +1,8 @@
 # YouTube → 中英字幕 → 哔哩哔哩
 
-将 YouTube 视频下载下来，英文字幕译为简体中文，烧录为画面双语字幕，并可一键投稿到哔哩哔哩。可选在投稿后轮询审核，若稿件被退回且说明中含时间轴，可自动剪片并替换重传。
+将 YouTube 视频下载、英文字幕译为简体中文、烧录为画面双语字幕，并可一键投稿哔哩哔哩。可选在投稿后轮询审核；若稿件被退回且说明中含时间轴，可自动剪片并替换重传。
+
+---
 
 ## 环境要求
 
@@ -8,11 +10,11 @@
 - [ffmpeg](https://ffmpeg.org/) 已加入系统 `PATH`
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp)（随 `requirements.txt` 安装）
 
-可选：若使用 YouTube 登录 cookies 下载时仍提示需 JS 验证，请安装 [Deno](https://deno.land/) 或 Node，或设置环境变量 `YTDLP_DENO_PATH` / `YTDLP_NODE_PATH` 指向可执行文件（见 [yt-dlp EJS 说明](https://github.com/yt-dlp/yt-dlp/wiki/EJS)）。
+**可选**
 
-云服务器若 **IPv6 不通**（`curl -6` 失败），下载默认启用 **仅 IPv4**（等同 `yt-dlp --force-ipv4`，环境变量 `YTDLP_FORCE_IPV4` 默认为 `1`）。若必须走 IPv6，设置 `YTDLP_FORCE_IPV4=0`。
-
-若下载失败且日志出现 **PO Token / GVS**：新版 YouTube 下旧 `android` 客户端常需 PO Token；本仓库默认 **`YTDLP_YOUTUBE_PLAYER_CLIENT=android_vr`**（多数环境不要求 GVS PO Token）。仍失败时可试 `tv`、`web` 等或见 [yt-dlp PO Token 说明](https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide)。若仍 **HTTP 403**，请在服务器放置 **youtube_cookies.txt**。并执行 `yt-dlp -U` 保持最新。
+- YouTube 需 JS 验证时：安装 [Deno](https://deno.land/) 或 Node，或设置 `YTDLP_DENO_PATH` / `YTDLP_NODE_PATH`（见 [yt-dlp EJS](https://github.com/yt-dlp/yt-dlp/wiki/EJS)）。
+- 云服务器 **IPv6 不通**：下载默认 **仅 IPv4**（`YTDLP_FORCE_IPV4` 默认 `1`）；若必须 IPv6，设 `YTDLP_FORCE_IPV4=0`。
+- **PO Token / GVS / 403**：本仓库默认 `YTDLP_YOUTUBE_PLAYER_CLIENT=android_vr`；仍失败可试 `tv`、`web` 等，或放置 `youtube_cookies.txt`，并保持 `yt-dlp -U`。
 
 ## 安装
 
@@ -25,88 +27,123 @@ pip install -r requirements.txt
 
 ### 哔哩哔哩（投稿）
 
-在项目根目录创建 `bilibili_cookie.env`（**勿提交到 Git**，见 `.gitignore`），例如：
+在项目根目录创建 `bilibili_cookie.env`（**勿提交 Git**，见 `.gitignore`）：
 
 ```env
 BILIBILI_SESSDATA=你的SESSDATA
 BILIBILI_BILI_JCT=你的bili_jct
 ```
 
-可选：`BILIBILI_BUVID3`、`BILIBILI_DEDEUSERID`、`BILIBILI_TID`（分区，默认 138）。
-
-Cookie 获取方式：浏览器登录 bilibili.com → 开发者工具 → 应用 → Cookie → 复制对应字段。详情见 `upload_bilibili.py` 顶部注释。
+可选：`BILIBILI_BUVID3`、`BILIBILI_DEDEUSERID`、`BILIBILI_TID`（分区，默认 138）。Cookie 获取方式见 `upload_bilibili.py` 顶部注释。
 
 ### 封面
 
-若项目根目录存在 **`bloomberg.jpg`**，投稿时优先使用该图作为封面；否则可使用环境变量 `BILIBILI_COVER` 指定路径，再否则从视频首帧截取。
+根目录存在 **`bloomberg.jpg`** 时优先作封面；否则可用 `BILIBILI_COVER`，再否则从视频首帧截取。
 
-### YouTube（可选，用于下载限速或会员内容）
+### YouTube（可选）
 
-在根目录放置浏览器导出的 Netscape cookies，命名为 `youtube_cookies.txt` 或 `www.youtube.com_cookies`（`.txt` 可选），或设置 `YOUTUBE_COOKIES_FILE` / 使用 `--cookies`。
+根目录放置 Netscape 格式 cookies：`youtube_cookies.txt` 或 `www.youtube.com_cookies*.txt`，或设 `YOUTUBE_COOKIES_FILE` / 使用 `--cookies`。
 
-## 一键流水线
+---
+
+## 一键流水线（任意 YouTube 链接）
 
 ```bash
 python youtube_to_bilibili.py "https://www.youtube.com/watch?v=..."
 ```
 
-- 视频与中间文件默认在 `video_subs/`（目录已加入 `.gitignore`）。流水线**成功结束后**会删除当前视频的中间文件，**只保留** `yt_<视频ID>_bilingual.mp4`（其它视频 ID 的文件不删）。
-- B 站标题默认在 YouTube 上传日期的前加前缀（`M/D/YYYY`），再接原标题；可用 `--title` 覆盖。
-- 若需只生成本地双语视频、不上传：加 `--no-upload`。
-- 若不需要上传后轮询审核与自动剪片：加 `--no-review-wait`。
-- 其它说明见 `youtube_to_bilibili.py` 文件头注释。
+| 行为 | 说明 |
+|------|------|
+| 输出目录 | `video_subs/`，成功结束后仅保留当前视频的 `yt_<视频ID>_bilingual.mp4` |
+| 标题 | 默认可带上传日期；`--title` 覆盖 |
+| 只本地、不上传 | `--no-upload` |
+| 不上传后轮询审核/剪片 | `--no-review-wait` |
+| 从某步继续 | `--from-step` 2/3/4（需已有中间文件） |
 
-### 后台运行（Linux / macOS / SSH）
+更多见 `youtube_to_bilibili.py` 文件头注释。
 
-在服务器或本机终端里，只需传入 **YouTube 视频 ID**（`watch?v=` 后面一段），用 `nohup` 后台执行一键流水线，断开 SSH 后任务仍会继续。日志写入 **`logs/`**（目录已加入 `.gitignore`）。
+### 后台运行（Linux / SSH）
 
 ```bash
 chmod +x run_youtube_to_bilibili_bg.sh
-./run_youtube_to_bilibili_bg.sh JOU5iy56FjY
-# 等价于 python youtube_to_bilibili.py "https://www.youtube.com/watch?v=JOU5iy56FjY"
-
-./run_youtube_to_bilibili_bg.sh JOU5iy56FjY --no-upload
+./run_youtube_to_bilibili_bg.sh <YouTube视频ID>
+# 参数接在 ID 后，如 --no-upload
 ```
 
-其余参数（如 `--title`、`--no-review-wait`）写在视频 ID 之后即可。脚本默认使用 **`python3.11`**；若要改用其它解释器，可先执行 `export PYTHON=python3`（或指向虚拟环境里 `python`）。脚本内默认 **`export YTDLP_YOUTUBE_PLAYER_CLIENT=android_vr`**（若已在环境变量里设置过则不会覆盖）。查看进度：`tail -f logs/youtube_to_bilibili_<视频ID>_*.log`（具体文件名以脚本输出为准）。
+日志：`logs/youtube_to_bilibili_<视频ID>_*.log`。解释器可用 `export PYTHON=python3`。
 
-### 从中间步骤继续
+### 中断后续跑
 
-若下载已完成但后续步骤失败（例如翻译中断），可在 **`video_subs/`** 里文件齐全的前提下用 `resume_youtube_pipeline.py` 续跑，无需重下视频：
+下载已完成而后续失败时，可用 `resume_youtube_pipeline.py`（需 `video_subs` 内文件齐全）：
 
 ```bash
-# 已有 yt_<视频ID>.mp4 与英文字幕，从翻译开始 → 烧录 → 上传
-python resume_youtube_pipeline.py --from translate --vid 视频ID --url "https://www.youtube.com/watch?v=..."
-
-# 已有中英 .vtt，仅从烧录开始
-python resume_youtube_pipeline.py --from burn --vid 视频ID --url "..."
-
-# 已有 yt_<视频ID>_bilingual.mp4，仅上传
-python resume_youtube_pipeline.py --from upload --vid 视频ID --url "..."
+python resume_youtube_pipeline.py --from translate --vid <视频ID> --url "https://..."
+python resume_youtube_pipeline.py --from burn --vid <视频ID> --url "https://..."
+python resume_youtube_pipeline.py --from upload --vid <视频ID> --url "https://..."
 ```
 
-只生成本地双语、不上传时可加 `--no-upload`（此时可不传 `--url`）。参数 `--title`、`--no-review-wait`、`--cookies` 等与一键脚本含义一致。
+`--no-upload` 时可不传 `--url`。详见脚本内说明。
+
+---
+
+## The China Show（Bloomberg）自动化
+
+搜索词与日期筛选逻辑在 `download_bloomberg_china_show.py` 中实现；**两条入口用途不同**：
+
+| 脚本 | 用途 |
+|------|------|
+| **`china_show_daily_to_bilibili.py`** | 搜「今日上传」的 China Show，对**未在** `china_show_processed_video_ids.json` 中的视频调用 **`youtube_to_bilibili.run_pipeline`**（下载 → 译 → 烧录 → 上传）。适合定时「一条龙」。 |
+| **`download_bloomberg_china_show.py`** | **仅**用 yt-dlp 下载到 `video_subs/`（`Bloomberg_China_Show_*.mp4`），**不**走翻译/B 站。适合只要源片存档或单独调试下载。 |
+
+二者**不要**为同一目的重复定时：要上 B 站用 **`china_show_daily_to_bilibili.py`** 即可。
+
+### 日志与跳过（定时任务）
+
+| 文件（均在 `logs/`） | 含义 |
+|----------------------|------|
+| `china_show_YYYYMMDD.log` | 仅 **`download_bloomberg_china_show.py`**：当日已成功下载则再次运行会跳过；`--force` 重跑。 |
+| `china_show_daily_YYYYMMDD.log` | 仅 **`china_show_daily_to_bilibili.py`**：当日**本轮待处理视频全部流水线成功**后写入；存在则当日后续运行直接退出；`--force` 忽略。 |
+
+### 定时示例（cron）
+
+工作日每 10 分钟跑一次 daily（路径自行替换）：
+
+```cron
+*/10 * * * 1-5 cd /path/to/bloombreg && /usr/bin/python3 china_show_daily_to_bilibili.py >> logs/china_show_daily_cron.log 2>&1
+```
+
+仅下载脚本同理，改用 `download_bloomberg_china_show.py` 与独立日志文件即可。
+
+---
 
 ## 其它脚本
 
 | 脚本 | 说明 |
 |------|------|
-| `upload_bilibili.py` | 单独上传本地 MP4 到 B 站（需同上 Cookie） |
-| `bilibili_review.py` | 对已投稿 BV 轮询审核；退回则按 `【HH:MM:SS-HH:MM:SS】` 剪片并替换稿件。可单独执行：`python bilibili_review.py BVxxx [可选：本地双语mp4路径]` |
-| `download_bloomberg_china_show.py` | 按搜索词下载 Bloomberg「China Show」相关视频到 `video_subs/` |
-| `bilingual_subs_to_video.py` | 将英/中字幕烧录进视频（流水线内部会调用） |
-| `translate_subs_to_zh_hans.py` / `vtt_to_srt.py` | 翻译与字幕格式转换 |
-| `resume_youtube_pipeline.py` | 从翻译/烧录/上传任一步继续，不重新下载（见上「从中间步骤继续」） |
-| `run_youtube_to_bilibili_bg.sh` | 仅传视频 ID，`nohup` 后台跑 `youtube_to_bilibili.py`，日志在 `logs/`（见上「后台运行」） |
+| `upload_bilibili.py` | 单独上传本地 MP4 |
+| `bilibili_review.py` | 对已投稿 BV 轮询审核；退回则解析时间轴、剪片并替换。`python bilibili_review.py BVxxx [本地双语mp4]` |
+| `bilingual_subs_to_video.py` | 英/中字幕烧录（流水线内部调用） |
+| `translate_subs_to_zh_hans.py` / `vtt_to_srt.py` | 翻译与字幕格式 |
+| `zh_sensitive_replace.py` | 中文字幕敏感词替换（流水线可选用） |
+| `test_bilibili_cookie.py` / `test_cjk_font_subtitle.py` | 连接与字体测试 |
 
-## 审核轮询（可选环境变量）
+---
+
+## 审核与剪片（`bilibili_review`）
+
+上传后轮询、退回说明解析、ffmpeg 剪片等见 `bilibili_review.py` 文件头（环境变量、完整接口 JSON 落盘 `logs/bilibili_review_api_*.json`、区间左右扩展 `BILIBILI_REVIEW_RECUT_PAD_SEC` 等）。
+
+常用环境变量：
 
 - `BILIBILI_REVIEW_POLL_INTERVAL_SEC`：轮询间隔（秒），默认 `30`
-- `BILIBILI_REVIEW_MAX_WAIT_SEC`：最长等待（秒），默认 `7200`
+- `BILIBILI_REVIEW_MAX_WAIT_SEC`：单轮最长等待（秒），默认 `7200`
+- `BILIBILI_REVIEW_MAX_REPLACE_ROUNDS`：最多剪片替换轮数，默认 `20`
+
+---
 
 ## 免责声明
 
-转载与投稿须遵守来源与哔哩哔哩社区规范，确保你有权使用相关素材；本仓库仅供个人学习与技术交流，请自行承担合规责任。
+转载与投稿须遵守来源与哔哩哔哩社区规范；本仓库仅供个人学习与技术交流，请自行承担合规责任。
 
 ## 许可
 

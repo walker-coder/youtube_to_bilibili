@@ -3,6 +3,8 @@
 
 去重：项目根目录 china_show_processed_video_ids.json 记录已成功的 YouTube 视频 ID，不会重复投稿。
 
+启动时若 logs 下已有当日文件 china_show_daily_YYYYMMDD.log（本轮待处理视频全部成功跑完流水线后写入），则直接退出；加 --force 可忽略该检查。
+
 依赖与 youtube_to_bilibili 相同；建议在视频上线后每日运行一次。
 
 Windows 任务计划程序示例（每天 18:30）:
@@ -20,10 +22,10 @@ import argparse
 import json
 import signal
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from paths_config import PROJECT_ROOT
+from paths_config import LOGS_DIR, PROJECT_ROOT, ensure_logs_dir
 
 from download_bloomberg_china_show import (
     SEARCH_COUNT,
@@ -34,6 +36,28 @@ from download_bloomberg_china_show import (
 from youtube_to_bilibili import run_pipeline
 
 PROCESSED_IDS_FILE = PROJECT_ROOT / "china_show_processed_video_ids.json"
+
+DAILY_LOG_PREFIX = "china_show_daily_"
+DAILY_LOG_SUFFIX = ".log"
+
+
+def today_daily_log_path(d: date | None = None) -> Path:
+    day = d or date.today()
+    return LOGS_DIR / f"{DAILY_LOG_PREFIX}{day.strftime('%Y%m%d')}{DAILY_LOG_SUFFIX}"
+
+
+def already_ran_daily_success() -> bool:
+    ensure_logs_dir()
+    return today_daily_log_path().exists()
+
+
+def _write_daily_success_log() -> None:
+    ensure_logs_dir()
+    p = today_daily_log_path()
+    p.write_text(
+        f"completed_at={datetime.now().isoformat(timespec='seconds')}\n",
+        encoding="utf-8",
+    )
 
 
 def _load_processed_ids(path: Path) -> set[str]:
@@ -104,7 +128,19 @@ def main() -> None:
         default=PROCESSED_IDS_FILE,
         help=f"去重 JSON 路径（默认 {PROCESSED_IDS_FILE.name}）",
     )
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help="忽略 logs 下当日 china_show_daily_YYYYMMDD.log 已存在时的退出",
+    )
     args = ap.parse_args()
+
+    if not args.force and not args.dry_run and already_ran_daily_success():
+        p = today_daily_log_path()
+        print(
+            f"今日已成功跑过本脚本（存在 {p}），跳过。需要重跑请加 --force"
+        )
+        sys.exit(0)
 
     dates = [date.today().strftime("%Y%m%d")]
     if args.include_yesterday:
@@ -154,6 +190,7 @@ def main() -> None:
         else None
     )
     try:
+        ok = 0
         for vid, url, e in pending:
             title = e.get("title") or ""
             print(f"\n>>> 开始流水线: {vid} | {title!r}\n")
@@ -173,6 +210,10 @@ def main() -> None:
             processed.add(vid)
             _save_processed_ids(args.state_file, processed)
             print(f"已记录成功: {vid} -> {args.state_file}")
+            ok += 1
+        if ok == len(pending) and pending:
+            _write_daily_success_log()
+            print(f"\n当日全部待处理视频已成功，已写入: {today_daily_log_path()}")
     finally:
         signal.signal(signal.SIGINT, old_int)
         if old_term is not None:
