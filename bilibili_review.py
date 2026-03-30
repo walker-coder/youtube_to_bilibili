@@ -9,7 +9,9 @@
   BILIBILI_REVIEW_MAX_REPLACE_ROUNDS  最多剪片替换次数（含多轮退回），默认 20，防止无限循环
   解析不到时间段时：终端会打印接口摘要（顶层键、可能含退回说明的嵌套字段节选、合并 JSON 的首尾截断），并写入 logs/bilibili_reject_raw_<BV>_<时间>.txt 全文。
   解析区间时优先从疑似退回正文字段提取，并对整段 JSON 使用 strict 匹配，避免裸「时:分:秒-时:分:秒」误命中无关字段（与网页不一致）。
-  退回时会在终端输出「哔哩哔哩审核内容」（整理自 archive 与优先字段；过长截断），完整接口仍见 logs/bilibili_reject_raw_*.txt。
+  退回时会在终端输出「哔哩哔哩审核内容」（整理自 archive 与优先字段；过长截断）。
+  退回时**必定**将 upload_args 与 page_state 的完整 JSON 写入 logs/bilibili_review_api_<BV>_<时间>.json，便于对照网页扩展正则。
+  BILIBILI_REVIEW_PRINT_FULL_JSON=1 时同时将完整 JSON 打印到终端（体积大）。
 
 单独补跑（已上传过、未走流水线步骤 5 时）：
   python bilibili_review.py BV1DhX1BVESJ
@@ -477,18 +479,22 @@ def extract_time_ranges_for_review(
     archive_json: dict, page_state: dict | None
 ) -> tuple[list[tuple[float, float]], str]:
     """
-    供轮询退回使用：优先从疑似退回正文字段用 strict 解析；再对整段接口文本 strict；最后宽松兜底。
-    返回 (区间列表, 说明字符串)。
+    供轮询退回使用：对「优先退回字段」与「整段接口 JSON」分别做 strict 解析后**合并**，
+    避免某一字段只含部分 P1、另一字段含完整「违规时间点」时提前返回漏段。
+    若无结果再对整段 blob 做宽松兜底。
     """
     priority = _collect_priority_reject_text(archive_json, page_state)
-    if priority.strip():
-        r = extract_time_ranges_from_text(priority, strict=True)
-        if r:
-            return r, "退回说明（接口优先字段，strict）"
     blob = _review_text_blob(archive_json, page_state)
-    r = extract_time_ranges_from_text(blob, strict=True)
-    if r:
-        return r, "合并接口 JSON（strict；若与网页不一致请对照 logs 全文）"
+    rp = (
+        extract_time_ranges_from_text(priority, strict=True)
+        if priority.strip()
+        else []
+    )
+    rb = extract_time_ranges_from_text(blob, strict=True)
+    merged = _merge_ranges(rp + rb)
+    if merged:
+        src = "优先字段 + 合并接口 JSON（strict 合并）"
+        return merged, src
     r = extract_time_ranges_from_text(blob, strict=False)
     if r:
         return (
@@ -503,6 +509,44 @@ def _review_text_blob(archive_json: dict, page_state: dict | None) -> str:
     if page_state is not None:
         parts.append(json.dumps(page_state, ensure_ascii=False))
     return "\n".join(parts)
+
+
+def _write_review_api_json(
+    bvid: str, archive_json: dict, page_state: dict | None
+) -> Path:
+    """退回时写入完整接口响应（pretty JSON），供对照网页与扩展正则。"""
+    from paths_config import PROJECT_ROOT
+
+    log_dir = PROJECT_ROOT / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fp = log_dir / f"bilibili_review_api_{bvid}_{stamp}.json"
+    payload = {
+        "bvid": bvid,
+        "fetched_at": datetime.now().isoformat(timespec="seconds"),
+        "upload_args_response": archive_json,
+        "page_state_initial": page_state,
+    }
+    fp.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return fp
+
+
+def _maybe_print_full_review_json(fp: Path) -> None:
+    if os.environ.get("BILIBILI_REVIEW_PRINT_FULL_JSON", "").strip() not in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return
+    try:
+        print("  ----- BILIBILI_REVIEW_PRINT_FULL_JSON -----")
+        print(fp.read_text(encoding="utf-8"))
+        print("  ----- end -----")
+    except OSError as e:
+        print(f"  （读取 {fp} 失败: {e}）")
 
 
 def _write_reject_debug_text(bvid: str, text: str) -> Path:
@@ -805,6 +849,12 @@ async def poll_and_repair_rejected(
                 return
 
             if status == "rejected":
+                api_fp = _write_review_api_json(bvid, archive_json, page_state)
+                print(
+                    f"  完整接口 JSON 已写入: {api_fp}"
+                    "（对照网页「违规时间点」、扩展正则时请附此文件）"
+                )
+                _maybe_print_full_review_json(api_fp)
                 print_bilibili_review_content(archive_json, page_state)
                 print("  哔哩哔哩审核：已退回，解析需删除的时间段…")
                 ranges, range_source = extract_time_ranges_for_review(
