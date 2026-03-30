@@ -23,6 +23,7 @@ from yt_dlp.utils import DownloadError
 
 from paths_config import PROJECT_ROOT, VIDEO_SUBS_DIR, ensure_video_subs_dir
 from translate_subs_to_zh_hans import translate_vtt_to_zh_hans
+from zh_sensitive_replace import apply_zh_sensitive_replacements_to_vtt
 from upload_bilibili import upload_video_to_bilibili
 from vtt_to_srt import vtt_to_srt
 from youtube_to_bilibili import (
@@ -226,6 +227,7 @@ def run_from(
         print(f"  视频: {video_path}")
         print(f"  英文字幕: {en_vtt}")
         zh_vtt = translate_vtt_to_zh_hans(en_vtt)
+        zh_vtt = apply_zh_sensitive_replacements_to_vtt(zh_vtt)
         print(f"步骤 3：烧录双语字幕…")
         out_bilingual = _burn_bilingual(vid, video_path, en_vtt, zh_vtt)
 
@@ -237,6 +239,7 @@ def run_from(
             raise FileNotFoundError(
                 f"未找到简体中文字幕（请先完成翻译步骤）: {zh_vtt}"
             )
+        zh_vtt = apply_zh_sensitive_replacements_to_vtt(zh_vtt)
         print(f"步骤 3：烧录双语字幕…")
         print(f"  视频: {video_path}")
         print(f"  英文: {en_vtt}")

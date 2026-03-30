@@ -13,6 +13,7 @@
 - 下载：**仅 1080p**（`height=1080` 的视频轨 + 音频，或单文件 1080p）。若当前环境下列不出 1080p 流，将报错退出，**不会**降级为 720p/360p。
 - 视频与字幕保存在 video_subs/，文件名以 yt_<视频ID> 为前缀。
 - 翻译默认使用免费引擎（deep-translator），长视频可能较慢；可配置 Google 翻译 API（见 translate_subs_to_zh_hans.py）。
+- 简体字幕可在项目根 zh_sensitive_word_map.json 配置敏感词对照（键→值）；烧录前自动替换。环境变量 ZH_SENSITIVE_WORD_MAP_JSON 可覆盖路径。
 - 转载投稿须自行确保有权使用素材，并遵守哔哩哔哩社区规范。
 - YouTube 登录态：不要用 bilibili_cookie.env（那是 B 站 KEY=value）。将浏览器导出的 Netscape 文件放在项目根目录，命名为 youtube_cookies.txt 或扩展默认名 www.youtube.com_cookies（.txt 可无），或传 --cookies / 环境变量 YOUTUBE_COOKIES_FILE。
 - 若下载仍慢：先 yt-dlp -U；再配合 cookies 常能缓解限速。
@@ -44,6 +45,7 @@ from paths_config import PROJECT_ROOT, VIDEO_SUBS_DIR, ensure_video_subs_dir
 from translate_subs_to_zh_hans import translate_vtt_to_zh_hans
 from upload_bilibili import upload_video_to_bilibili
 from vtt_to_srt import vtt_to_srt
+from zh_sensitive_replace import apply_zh_sensitive_replacements_to_vtt
 
 # 仅 1080p：DASH 合并（最佳 1080p 视频轨 + 最佳音频）或极少数单文件 1080p；无匹配则 yt-dlp 失败。
 YOUTUBE_FORMAT_1080P_ONLY = "bestvideo[height=1080]+bestaudio/best[height=1080]"
@@ -519,6 +521,9 @@ def run_pipeline(
         assert en_vtt is not None
         print(f"步骤 2/{total_steps}：翻译为简体中文（可能较久）…")
         zh_vtt = translate_vtt_to_zh_hans(en_vtt)
+
+    if zh_vtt is not None and from_step <= 3:
+        zh_vtt = apply_zh_sensitive_replacements_to_vtt(zh_vtt)
 
     if from_step <= 3:
         assert video_path is not None and en_vtt is not None and zh_vtt is not None
