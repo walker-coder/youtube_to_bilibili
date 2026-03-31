@@ -30,28 +30,62 @@ CHINA_SHOW_LOG_SUFFIX = ".log"
 
 
 # 全站搜索词（带上频道名，第一条多为该频道节目）
-SEARCH_QUERY = "china show Bloomberg Television"
+SEARCH_QUERY = "The china show bloomberg"
 # 文件名模板（会存到 video_subs 目录下）
 OUTPUT_TEMPLATE = "Bloomberg_China_Show_%(title)s.%(ext)s"
 # 搜索条数，用于从中筛选今天上传的（取第一条匹配）
 SEARCH_COUNT = 10
 
 
-def fetch_china_show_entries(*, search_count: int | None = None) -> list[dict[str, Any]]:
+class _YdlQuietLogger:
+    """Filter noisy yt-dlp warnings while keeping hard errors visible."""
+
+    _SUPPRESS_SUBSTRINGS = (
+        "No supported JavaScript runtime could be found",
+        "YouTube extraction without a JS runtime has been deprecated",
+    )
+
+    def debug(self, msg: str) -> None:
+        return
+
+    def warning(self, msg: str) -> None:
+        if any(s in msg for s in self._SUPPRESS_SUBSTRINGS):
+            return
+        print(msg)
+
+    def error(self, msg: str) -> None:
+        print(msg)
+
+
+def fetch_china_show_entries(
+    *,
+    search_count: int | None = None,
+    current_week_only: bool = False,
+    upload_dates: list[str] | None = None,
+) -> list[dict[str, Any]]:
     """
     仅拉取元数据，不下载。返回 yt_dlp 的 entry 字典列表（可能含 id、title、upload_date 等）。
+    current_week_only=True 时，仅返回本周（周一到今天）上传的视频。
+    upload_dates:
+      - 传入 YYYYMMDD 列表，按指定上传日期精确筛选（优先级高于 current_week_only）
     """
     n = search_count if search_count is not None else SEARCH_COUNT
     search_string = f"ytsearch{n}:{SEARCH_QUERY}"
     extract_opts = {
         "quiet": True,
         "extract_flat": False,
+        "logger": _YdlQuietLogger(),
     }
     with yt_dlp.YoutubeDL(extract_opts) as ydl:
         info = ydl.extract_info(search_string, download=False)
     if not info or not info.get("entries"):
         return []
-    return [e for e in info["entries"] if e]
+    entries = [e for e in info["entries"] if e]
+    if upload_dates:
+        return filter_entries_by_upload_dates(entries, upload_dates)
+    if current_week_only:
+        return filter_entries_by_current_week(entries)
+    return entries
 
 
 def filter_entries_by_upload_dates(
@@ -61,6 +95,28 @@ def filter_entries_by_upload_dates(
     """只保留 upload_date 在给定 YYYYMMDD 列表中的条目（顺序与搜索一致）。"""
     want = set(dates_yyyymmdd)
     return [e for e in entries if (e.get("upload_date") or "") in want]
+
+
+def filter_entries_by_current_week(
+    entries: list[dict[str, Any]],
+    *,
+    ref_day: date | None = None,
+) -> list[dict[str, Any]]:
+    """只保留 upload_date 在本周（周一到今天）范围内的条目。"""
+    today = ref_day or date.today()
+    start_of_week = today - timedelta(days=today.weekday())
+    kept: list[dict[str, Any]] = []
+    for e in entries:
+        s = e.get("upload_date") or ""
+        if not s:
+            continue
+        try:
+            d = datetime.strptime(s, "%Y%m%d").date()
+        except ValueError:
+            continue
+        if start_of_week <= d <= today:
+            kept.append(e)
+    return kept
 
 
 def entry_watch_url(entry: dict[str, Any]) -> str | None:

@@ -20,7 +20,7 @@ from __future__ import annotations
 import argparse
 import signal
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 
 from paths_config import LOGS_DIR, ensure_logs_dir
@@ -81,11 +81,6 @@ def main() -> None:
         metavar="N",
         help=f"ytsearch 条数（默认 {SEARCH_COUNT}）",
     )
-    ap.add_argument(
-        "--include-yesterday",
-        action="store_true",
-        help="除今天外，仍包含「日历昨天」上传（时区/上架延迟时可开）",
-    )
     ap.add_argument("--no-upload", action="store_true", help="同 youtube_to_bilibili")
     ap.add_argument("--cookies", metavar="FILE", default=None, help="YouTube cookies 文件")
     ap.add_argument(
@@ -119,17 +114,33 @@ def main() -> None:
         sys.exit(0)
 
     dates = [date.today().strftime("%Y%m%d")]
-    if args.include_yesterday:
-        dates.append((date.today() - timedelta(days=1)).strftime("%Y%m%d"))
 
     entries = fetch_china_show_entries(search_count=args.search_count)
     if not entries:
         print("未搜到任何视频，退出。")
         sys.exit(0)
+    if args.dry_run:
+        print(f"搜索命中 {len(entries)} 个视频（未筛选）：")
+        for e in entries:
+            vid = _video_id(e) or "unknown"
+            title = e.get("title") or ""
+            upload_date = e.get("upload_date") or "unknown"
+            url = entry_watch_url(e) or "unknown"
+            print(f"  - {vid} | upload_date={upload_date} | title={title}")
+            print(f"    url={url}")
 
     today_entries = filter_entries_by_upload_dates(entries, dates)
     if not today_entries:
         print(f"搜索前 {args.search_count} 条中，无 upload_date 为 {dates} 的视频，退出。")
+        sys.exit(0)
+    today_entries = [
+        e for e in today_entries if "The China Show" in str(e.get("title") or "")
+    ]
+    if not today_entries:
+        print(
+            f"搜索前 {args.search_count} 条中，无标题包含 'The China Show' 且 "
+            f"upload_date 为 {dates} 的视频，退出。"
+        )
         sys.exit(0)
 
     pending: list[tuple[str, str, dict]] = []
@@ -146,10 +157,17 @@ def main() -> None:
         sys.exit(0)
 
     print(f"待处理 {len(pending)} 个视频（日期 {dates}）。")
+    for vid, url, e in pending:
+        title = e.get("title") or ""
+        upload_date = e.get("upload_date") or "unknown"
+        print(f"  - {vid} | upload_date={upload_date} | title={title}")
 
     if args.dry_run:
         for vid, url, e in pending:
-            print(f"  [dry-run] {vid} {url}\n    {e.get('title', '')}")
+            print(
+                f"  [dry-run] {vid} {url}\n"
+                f"    upload_date={e.get('upload_date', 'unknown')} | title={e.get('title', '')}"
+            )
         sys.exit(0)
 
     old_int = signal.signal(signal.SIGINT, signal.SIG_DFL)
