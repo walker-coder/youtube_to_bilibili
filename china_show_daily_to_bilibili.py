@@ -1,5 +1,5 @@
 """
-定时任务：查询「今天上传」的 The China Show（Bloomberg 搜索），对匹配到的视频调用 youtube_to_bilibili.run_pipeline。
+定时任务：按搜索词与 upload_date 筛选 The China Show（默认「今天」；可用 --search-keyword-date 指定同一天），对匹配到的视频调用 youtube_to_bilibili.run_pipeline。
 
 去重：仅 logs/china_show_daily_YYYYMMDD.log —— 任一流水线**成功结束**后写入；存在则当日后续 cron 直接跳过（省 yt 搜索与负载）。
 若同一天还要再跑，请用 --force 或删除当日 log，或使用 --no-daily-log。
@@ -81,6 +81,15 @@ def main() -> None:
         metavar="N",
         help=f"ytsearch 条数（默认 {SEARCH_COUNT}）",
     )
+    ap.add_argument(
+        "--search-keyword-date",
+        metavar="YYYY-MM-DD",
+        default=None,
+        help=(
+            "搜索关键词里的日期（Bloomberg Television China Show M/D/YYYY），"
+            "并作为 upload_date 筛选日（YYYYMMDD）；省略则搜索词与筛选日均为今天"
+        ),
+    )
     ap.add_argument("--no-upload", action="store_true", help="同 youtube_to_bilibili")
     ap.add_argument("--cookies", metavar="FILE", default=None, help="YouTube cookies 文件")
     ap.add_argument(
@@ -105,6 +114,17 @@ def main() -> None:
     )
     args = ap.parse_args()
 
+    search_keyword_day: date | None = None
+    if args.search_keyword_date:
+        try:
+            search_keyword_day = datetime.strptime(
+                args.search_keyword_date, "%Y-%m-%d"
+            ).date()
+        except ValueError:
+            ap.error(
+                f"--search-keyword-date 需为 YYYY-MM-DD，收到: {args.search_keyword_date!r}"
+            )
+
     if not args.no_daily_log and not args.force and already_ran_daily_success():
         p = daily_success_log_path()
         print(
@@ -113,9 +133,13 @@ def main() -> None:
         )
         sys.exit(0)
 
-    dates = [date.today().strftime("%Y%m%d")]
+    filter_day = search_keyword_day if search_keyword_day is not None else date.today()
+    dates = [filter_day.strftime("%Y%m%d")]
 
-    entries = fetch_china_show_entries(search_count=args.search_count)
+    entries = fetch_china_show_entries(
+        search_count=args.search_count,
+        search_keyword_day=search_keyword_day,
+    )
     if not entries:
         print("未搜到任何视频，退出。")
         sys.exit(0)

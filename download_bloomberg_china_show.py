@@ -1,6 +1,6 @@
 """
-从 YouTube 搜索 "china show Bloomberg Television"，并下载第一条视频。
-（Bloomberg 频道无公开「搜索」标签，故用全站搜索并带频道名。）
+从 YouTube 搜索「Bloomberg Television China Show <今日 M/D/YYYY>」，并下载第一条视频。
+（Bloomberg 频道无公开「搜索」标签，故用全站搜索并带频道名与日期。）
 
 - 视频与英文字幕保存到 video_subs 目录。
 - 优先下载「今天」上传的视频；若没有，则下载搜索到的「最新一期」。
@@ -29,8 +29,16 @@ CHINA_SHOW_LOG_PREFIX = "china_show_"
 CHINA_SHOW_LOG_SUFFIX = ".log"
 
 
-# 全站搜索词（带上频道名，第一条多为该频道节目）
-SEARCH_QUERY = "The china show bloomberg"
+# 全站搜索词：固定前缀 + 今日日期（M/D/YYYY，与视频标题常见写法一致）
+SEARCH_QUERY_PREFIX = "Bloomberg Television China Show"
+
+
+def search_query(*, ref_day: date | None = None) -> str:
+    d = ref_day or date.today()
+    date_part = f"{d.month}/{d.day}/{d.year}"
+    return f"{SEARCH_QUERY_PREFIX} {date_part}"
+
+
 # 文件名模板（会存到 video_subs 目录下）
 OUTPUT_TEMPLATE = "Bloomberg_China_Show_%(title)s.%(ext)s"
 # 搜索条数，用于从中筛选今天上传的（取第一条匹配）
@@ -62,15 +70,18 @@ def fetch_china_show_entries(
     search_count: int | None = None,
     current_week_only: bool = False,
     upload_dates: list[str] | None = None,
+    search_keyword_day: date | None = None,
 ) -> list[dict[str, Any]]:
     """
     仅拉取元数据，不下载。返回 yt_dlp 的 entry 字典列表（可能含 id、title、upload_date 等）。
+    search_keyword_day:
+      - 用于搜索词「Bloomberg Television China Show M/D/YYYY」中的日期；默认今天。
     current_week_only=True 时，仅返回本周（周一到今天）上传的视频。
     upload_dates:
       - 传入 YYYYMMDD 列表，按指定上传日期精确筛选（优先级高于 current_week_only）
     """
     n = search_count if search_count is not None else SEARCH_COUNT
-    search_string = f"ytsearch{n}:{SEARCH_QUERY}"
+    search_string = f"ytsearch{n}:{search_query(ref_day=search_keyword_day)}"
     extract_opts = {
         "quiet": True,
         "extract_flat": False,
@@ -94,6 +105,7 @@ def filter_entries_by_upload_dates(
 ) -> list[dict[str, Any]]:
     """只保留 upload_date 在给定 YYYYMMDD 列表中的条目（顺序与搜索一致）。"""
     want = set(dates_yyyymmdd)
+    print('entries', entries)
     return [e for e in entries if (e.get("upload_date") or "") in want]
 
 
