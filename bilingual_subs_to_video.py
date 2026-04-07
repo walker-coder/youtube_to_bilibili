@@ -5,7 +5,8 @@
 - ffmpeg 烧录字幕时需要一种字幕格式；本脚本在内部使用「临时 ASS」，默认不写 1_bilingual.ass。
 - 需要长期保存 ASS 调试时，请加 --keep-ass 路径。
 
-依赖：ffmpeg 在 PATH；可选 Pillow（仅 --export-pngs）。
+依赖：ffmpeg、ffprobe 在 PATH（cron 下 PATH 常较窄，见下）；可选 Pillow（仅 --export-pngs）。
+  若 crontab 中报 ``FileNotFoundError: ... 'ffprobe'``：在 crontab 中设置 ``PATH=/usr/bin:/usr/local/bin:/bin``，或设置环境变量 ``FFMPEG_PATH`` / ``FFPROBE_PATH``（或 ``BLOOMBREG_FFMPEG`` / ``BLOOMBREG_FFPROBE``）为可执行文件绝对路径。
 
 Linux 烧录中文若出现「方框/豆腐块」：系统缺少 ASS 里指定字体中的汉字字形。请安装含汉字的 CJK 字体，并用 ``fc-list | grep -i noto``（或 ``fc-list :lang=zh``）核对 fontconfig 中的**确切**字体名，设环境变量 ``BLOOMBREG_ASS_FONTNAME``（默认非 Windows 为 ``Noto Sans CJK SC``）。未设置时 Windows 默认 ``Microsoft YaHei``。
 
@@ -32,6 +33,7 @@ import argparse
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -41,6 +43,33 @@ from datetime import datetime
 from pathlib import Path
 
 from paths_config import PROJECT_ROOT, VIDEO_SUBS_DIR, ensure_video_subs_dir
+
+
+def _ffmpeg_exe() -> str:
+    """可执行文件路径；cron 下请设 PATH 或 FFMPEG_PATH / BLOOMBREG_FFMPEG。"""
+    for key in ("FFMPEG_PATH", "BLOOMBREG_FFMPEG"):
+        p = (os.environ.get(key) or "").strip()
+        if p:
+            return p
+    w = shutil.which("ffmpeg")
+    return w if w else "ffmpeg"
+
+
+def _ffprobe_exe() -> str:
+    """可执行文件路径；cron 下请设 PATH 或 FFPROBE_PATH / BLOOMBREG_FFPROBE。"""
+    for key in ("FFPROBE_PATH", "BLOOMBREG_FFPROBE"):
+        p = (os.environ.get(key) or "").strip()
+        if p:
+            return p
+    w = shutil.which("ffprobe")
+    if w:
+        return w
+    ff = shutil.which("ffmpeg")
+    if ff:
+        sibling = Path(ff).resolve().parent / "ffprobe"
+        if sibling.is_file():
+            return str(sibling)
+    return "ffprobe"
 
 
 def _parse_srt(path: Path) -> list[dict]:
@@ -213,7 +242,7 @@ def _export_pngs(
 def _ffprobe_duration_sec(video: Path) -> float | None:
     """返回视频时长（秒），失败时 None。"""
     cmd = [
-        "ffprobe",
+        _ffprobe_exe(),
         "-v",
         "error",
         "-show_entries",
@@ -222,13 +251,20 @@ def _ffprobe_duration_sec(video: Path) -> float | None:
         "default=noprint_wrappers=1:nokey=1",
         str(video.resolve()),
     ]
-    r = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    try:
+        r = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except FileNotFoundError as e:
+        raise RuntimeError(
+            "未找到 ffprobe（cron 下常见：PATH 不含 ffmpeg 所在目录）。"
+            "请安装 ffmpeg 包，或在 crontab 中设置 PATH=/usr/bin:/usr/local/bin:…，"
+            "或设置环境变量 FFPROBE_PATH / BLOOMBREG_FFPROBE 为 ffprobe 绝对路径。"
+        ) from e
     if r.returncode != 0:
         return None
     try:
@@ -268,7 +304,7 @@ def _burn_ffmpeg(
     sub_path = str(ass_rel).replace("\\", "/")
     vf = f"subtitles={sub_path}:charenc=UTF-8"
     extra = shlex.split(os.environ.get("BLOOMBREG_FFMPEG_BURN_ARGS", "").strip())
-    cmd = ["ffmpeg", "-y", *extra]
+    cmd = [_ffmpeg_exe(), "-y", *extra]
     cmd += [
         "-i",
         str(vid_rel).replace("\\", "/"),
@@ -313,16 +349,22 @@ def _burn_ffmpeg(
     last_int_pct = -1
     tty = sys.stdout.isatty()
     try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(root),
-            stderr=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-        )
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(root),
+                stderr=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+            )
+        except FileNotFoundError as e:
+            raise RuntimeError(
+                "未找到 ffmpeg（cron 下常见：PATH 过窄）。"
+                "请安装 ffmpeg，或在 crontab 中设置 PATH，或设置 FFMPEG_PATH / BLOOMBREG_FFMPEG。"
+            ) from e
         st["proc"] = proc
         assert proc.stderr is not None
         for line in proc.stderr:
