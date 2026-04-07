@@ -1,8 +1,10 @@
 """
 定时任务：按搜索词与 upload_date 筛选 The China Show（默认「今天」；可用 --search-keyword-date 指定同一天），对匹配到的视频调用 youtube_to_bilibili.run_pipeline。
 
-去重：仅 logs/china_show_daily_YYYYMMDD.log —— 任一流水线**成功结束**后写入；存在则当日后续 cron 直接跳过（省 yt 搜索与负载）。
-若同一天还要再跑，请用 --force 或删除当日 log，或使用 --no-daily-log。
+去重（满足任一即跳过当日）：
+  - logs/china_show_daily_YYYYMMDD.log（本脚本任一流水线**成功结束**后写入）
+  - logs 下已有 youtube_to_bilibili_<视频ID>_YYYYMMDD_<HHMMSS>.log（与 run_youtube_to_bilibili_bg.sh 等一致，按文件名中的 YYYYMMDD 识别「当日」）
+若同一天还要再跑，请用 --force 或删除上述标记 / 对应流水线日志，或使用 --no-daily-log。
 
 依赖与 youtube_to_bilibili 相同。
 
@@ -18,6 +20,7 @@ Linux cron 示例（工作日每 10 分钟）:
 from __future__ import annotations
 
 import argparse
+import re
 import signal
 import sys
 from datetime import date, datetime
@@ -35,6 +38,10 @@ from youtube_to_bilibili import run_pipeline
 
 DAILY_LOG_PREFIX = "china_show_daily_"
 DAILY_LOG_SUFFIX = ".log"
+# run_youtube_to_bilibili_bg.sh: youtube_to_bilibili_${VID}_%Y%m%d_%H%M%S.log
+_YT_PIPELINE_LOG_RE = re.compile(
+    r"^youtube_to_bilibili_(.+)_(\d{8})_(\d{6})\.log$", re.ASCII
+)
 
 
 def daily_success_log_path(d: date | None = None) -> Path:
@@ -43,9 +50,22 @@ def daily_success_log_path(d: date | None = None) -> Path:
     return LOGS_DIR / f"{DAILY_LOG_PREFIX}{day.strftime('%Y%m%d')}{DAILY_LOG_SUFFIX}"
 
 
+def _has_youtube_to_bilibili_log_for_day(day: date) -> Path | None:
+    """若 logs 下存在 youtube_to_bilibili_*_YYYYMMDD_*.log（文件名内日期为 day），返回其一；否则 None。"""
+    ymd = day.strftime("%Y%m%d")
+    ensure_logs_dir()
+    for p in LOGS_DIR.glob("youtube_to_bilibili_*.log"):
+        m = _YT_PIPELINE_LOG_RE.match(p.name)
+        if m and m.group(2) == ymd:
+            return p
+    return None
+
+
 def already_ran_daily_success() -> bool:
     ensure_logs_dir()
-    return daily_success_log_path().exists()
+    if daily_success_log_path().exists():
+        return True
+    return _has_youtube_to_bilibili_log_for_day(date.today()) is not None
 
 
 def _write_daily_success_log(note: str = "") -> None:
@@ -105,12 +125,12 @@ def main() -> None:
     ap.add_argument(
         "--force",
         action="store_true",
-        help="忽略 logs 下当日 china_show_daily_YYYYMMDD.log",
+        help="忽略当日去重：china_show_daily_YYYYMMDD.log 与 youtube_to_bilibili_*_YYYYMMDD_*.log",
     )
     ap.add_argument(
         "--no-daily-log",
         action="store_true",
-        help="不写入、不检测 china_show_daily_YYYYMMDD.log（每次匹配到的今日视频都会跑流水线）",
+        help="不写入、不检测当日去重（含上述两类标记；每次匹配到的今日视频都会跑流水线）",
     )
     args = ap.parse_args()
 
@@ -127,9 +147,14 @@ def main() -> None:
 
     if not args.no_daily_log and not args.force and already_ran_daily_success():
         p = daily_success_log_path()
+        if p.exists():
+            reason = f"china_show_daily 标记: {p}"
+        else:
+            yt = _has_youtube_to_bilibili_log_for_day(date.today())
+            reason = f"当日流水线日志已存在: {yt}"
         print(
-            f"今日 china_show_daily 已成功跑过（存在 {p}），跳过。"
-            " 若仍需跑请用 --force 或删除该文件。"
+            f"今日已跳过（{reason}）。"
+            " 若仍需跑请用 --force，或删除对应标记/日志文件。"
         )
         sys.exit(0)
 

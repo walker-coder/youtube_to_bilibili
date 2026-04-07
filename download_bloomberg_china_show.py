@@ -105,7 +105,6 @@ def filter_entries_by_upload_dates(
 ) -> list[dict[str, Any]]:
     """只保留 upload_date 在给定 YYYYMMDD 列表中的条目（顺序与搜索一致）。"""
     want = set(dates_yyyymmdd)
-    print('entries', entries)
     return [e for e in entries if (e.get("upload_date") or "") in want]
 
 
