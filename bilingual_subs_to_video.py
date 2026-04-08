@@ -147,19 +147,21 @@ def _ass_fontname() -> str:
     return "Noto Sans CJK SC"
 
 
-def _cue_to_ass_text(s: str) -> str:
+def _srt_cue_to_single_ass_line(s: str, *, cjk: bool) -> str:
     """
-    将一条 SRT 字幕块内的多行，转为 ASS 单行内的 \\N 换行。
-    若直接把 Python 的 \\n 写进 .ass 文件，会截断 Dialogue，导致只显示第一行（常见为只剩英文）。
+    一条 SRT 字幕块内若有多行，合并为单一显示行再 ASS 转义。
+    中文（cjk=True）行与行直接拼接；英文（cjk=False）行与行用空格拼接。
+    中英之间仍用 \\N 分成两行（中文在上、英文在下）。
     """
     parts = [p.strip() for p in s.splitlines() if p.strip()]
     if not parts:
         return ""
-    return r"\N".join(_ass_escape(p) for p in parts)
+    merged = "".join(parts) if cjk else " ".join(parts)
+    return _ass_escape(merged)
 
 
 def _merge_to_ass(en_cues: list[dict], zh_cues: list[dict]) -> str:
-    """生成 ASS：底部水平居中，上行中文、下行英文；黄底黑字（BorderStyle 3 不透明框）。"""
+    """生成 ASS：底部水平居中，上行中文一行、下行英文一行；黄底黑字（BorderStyle 3 不透明框）。"""
     font = _ass_fontname()
     n = min(len(en_cues), len(zh_cues))
     if len(en_cues) != len(zh_cues):
@@ -167,7 +169,9 @@ def _merge_to_ass(en_cues: list[dict], zh_cues: list[dict]) -> str:
 
     # \\an2 底中；\\pos 的 Y 为底边锚点，数值越大越贴近画面下缘（1080p 下缘为 1080）。
     # BorderStyle=3 时 OutlineColour 勿用纯黑，Outline 与字号成比例以免黑边盖黄底。
+    # MarginL/MarginR 较小以便字幕向左右多占宽度（相对原先 80）。
     line_tag = r"{\an2\pos(960,1040)\fs64\c&H000000&}"
+    margin_lr = 24
 
     lines = [
         "[Script Info]",
@@ -182,7 +186,7 @@ def _merge_to_ass(en_cues: list[dict], zh_cues: list[dict]) -> str:
         "[V4+ Styles]",
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
         # BorderStyle=3：Back=亮黄；Primary=黑字；OutlineColour 勿用纯黑（见上行注释）。StrikeOut 后须接 ScaleX=100,ScaleY=100。
-        f"Style: Default,{font},64,&H00000000,&H00000000,&H0000FFFF,&H0000FFFF,-1,0,0,0,100,100,0,0,3,8,0,2,80,80,100,1",
+        f"Style: Default,{font},64,&H00000000,&H00000000,&H0000FFFF,&H0000FFFF,-1,0,0,0,100,100,0,0,3,8,0,2,{margin_lr},{margin_lr},100,1",
         "",
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
@@ -193,8 +197,8 @@ def _merge_to_ass(en_cues: list[dict], zh_cues: list[dict]) -> str:
         zh = zh_cues[i]["text"]
         start = _sec_to_ass_time(en_cues[i]["start"])
         end = _sec_to_ass_time(en_cues[i]["end"])
-        en_ass = _cue_to_ass_text(en)
-        zh_ass = _cue_to_ass_text(zh)
+        en_ass = _srt_cue_to_single_ass_line(en, cjk=False)
+        zh_ass = _srt_cue_to_single_ass_line(zh, cjk=True)
         body = zh_ass + r"\N{\fs56\c&H000000&}" + en_ass
         lines.append(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{line_tag}{body}")
 
