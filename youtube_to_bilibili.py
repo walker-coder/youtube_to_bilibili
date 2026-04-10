@@ -576,7 +576,7 @@ def run_pipeline(
         title = base_title
     title = title[:80]
     desc = (
-        f"转载自 YouTube。\n原链接: {url}\n\n"
+        f"转载自 YouTube"
         "仅供个人学习交流，如有侵权请联系删除。"
     )
     result = upload_video_to_bilibili(
@@ -631,7 +631,7 @@ def main() -> None:
     ap.add_argument(
         "--no-review-wait",
         action="store_true",
-        help="上传成功后不轮询审核、不自动按退回剪片替换",
+        help="上传成功后不轮询审核、不自动按退回剪片替换；之后可手动: python bilibili_review.py <BV> video_subs/yt_*_bilingual.mp4",
     )
     ap.add_argument(
         "--from-step",

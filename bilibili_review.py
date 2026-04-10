@@ -21,10 +21,14 @@
   python bilibili_review.py BV1DhX1BVESJ video_subs/yt_xxx_bilingual.mp4
   第二参数省略时自动选 video_subs 下最新 *_bilingual.mp4
 
-仅替换视频（本地已剪好 recut / 成片，只上传覆盖分 P、不轮询、不自动剪片）：
+仅替换视频（本地已剪好 recut / 成片，只上传覆盖分 P）：
   python bilibili_review.py BV1xxxxxxxxxx video_subs/yt_xxx_bilingual_recut.mp4 --replace-only
   # 或：python bilibili_review.py BV1xxxxxxxxxx --replace-only --video video_subs/yt_xxx_bilingual_recut.mp4
   # 勿写成 BV号 --replace-only 路径（若脚本未识别 --replace-only，路径会被当成多余参数报错）
+
+替换后继续自动轮询（再退回则按退回说明剪片并替换，与流水线步骤 5 一致）：
+  python bilibili_review.py BV1xxxxxxxxxx video_subs/yt_xxx_bilingual_recut.mp4 --replace-only --resume-review
+  # 若已只做过 --replace-only，也可补跑（不再次上传）：python bilibili_review.py BV1xx video_subs/yt_xxx_bilingual_recut.mp4
 
 第一个参数必须是哔哩哔哩「稿件 BV 号」（创作中心或视频页地址里的 BVxxxxxxxx，共 12 位），
 不要使用 YouTube 视频 ID（如 yt_xxxx_bilingual 里的 11 位 ID），否则接口会返回 -400。
@@ -1058,13 +1062,26 @@ def main() -> None:
     ap.add_argument(
         "--replace-only",
         action="store_true",
-        help="只上传并替换该 BV 的分 P，不轮询审核、不解析退回、不剪片",
+        help="只上传并替换该 BV 的分 P；默认不轮询，可加 --resume-review",
+    )
+    ap.add_argument(
+        "--resume-review",
+        action="store_true",
+        help="与 --replace-only 连用：替换成功后继续轮询审核；再退回则剪片替换（多轮）",
     )
     args = ap.parse_args()
     try:
         bvid = normalize_bvid_cli_arg(args.bvid)
     except ValueError as e:
         print(f"错误: {e}", file=sys.stderr)
+        sys.exit(2)
+    if args.resume_review and not args.replace_only:
+        print(
+            "错误: --resume-review 仅可与 --replace-only 连用；"
+            "若只需轮询/自动剪片不替换，请: "
+            f"python bilibili_review.py {bvid} video_subs/yt_xxx_bilingual.mp4",
+            file=sys.stderr,
+        )
         sys.exit(2)
     if args.replace_only:
         raw_vp = args.video_flag or args.video
@@ -1098,6 +1115,15 @@ def main() -> None:
                 print(f"错误: B 站接口: {e}", file=sys.stderr)
                 sys.exit(1)
             raise
+        if args.resume_review:
+            print(
+                "\n继续轮询审核（退回则按说明剪片并替换，通过则结束；多轮上限见 BILIBILI_REVIEW_MAX_REPLACE_ROUNDS）…"
+            )
+            try:
+                run_review_flow_sync(bvid, vp)
+            except (RuntimeError, TimeoutError, FileNotFoundError) as e:
+                print(f"错误: {e}", file=sys.stderr)
+                sys.exit(1)
         return
 
     if args.video_flag:
