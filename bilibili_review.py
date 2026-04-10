@@ -22,7 +22,9 @@
   第二参数省略时自动选 video_subs 下最新 *_bilingual.mp4
 
 仅替换视频（本地已剪好 recut / 成片，只上传覆盖分 P、不轮询、不自动剪片）：
-  python bilibili_review.py BV1xxxxxxxxxx --replace-only video_subs/yt_xxx_bilingual_recut.mp4
+  python bilibili_review.py BV1xxxxxxxxxx video_subs/yt_xxx_bilingual_recut.mp4 --replace-only
+  # 或：python bilibili_review.py BV1xxxxxxxxxx --replace-only --video video_subs/yt_xxx_bilingual_recut.mp4
+  # 勿写成 BV号 --replace-only 路径（若脚本未识别 --replace-only，路径会被当成多余参数报错）
 
 第一个参数必须是哔哩哔哩「稿件 BV 号」（创作中心或视频页地址里的 BVxxxxxxxx，共 12 位），
 不要使用 YouTube 视频 ID（如 yt_xxxx_bilingual 里的 11 位 ID），否则接口会返回 -400。
@@ -1044,7 +1046,14 @@ def main() -> None:
         "video",
         nargs="?",
         default=None,
-        help=f"本地 MP4；省略则用 {VIDEO_SUBS_DIR.name} 下最新 *_bilingual.mp4（--replace-only 时必须指定）",
+        help=f"本地 MP4；省略则用 {VIDEO_SUBS_DIR.name} 下最新 *_bilingual.mp4（--replace-only 时须指定本参数或 --video）",
+    )
+    ap.add_argument(
+        "--video",
+        dest="video_flag",
+        metavar="PATH",
+        default=None,
+        help="本地视频路径（与第二位置参数二选一；推荐与 --replace-only 连用，避免歧义）",
     )
     ap.add_argument(
         "--replace-only",
@@ -1058,14 +1067,22 @@ def main() -> None:
         print(f"错误: {e}", file=sys.stderr)
         sys.exit(2)
     if args.replace_only:
-        if not args.video:
+        raw_vp = args.video_flag or args.video
+        if not raw_vp:
             print(
-                "错误: --replace-only 须指定本地视频路径，例如 "
-                f"video_subs/yt_xxx_bilingual_recut.mp4",
+                "错误: --replace-only 须指定视频路径。推荐：\n"
+                f"  python bilibili_review.py {bvid} video_subs/xxx.mp4 --replace-only\n"
+                f"  或: python bilibili_review.py {bvid} --replace-only --video video_subs/xxx.mp4",
                 file=sys.stderr,
             )
             sys.exit(2)
-        vp = Path(args.video).resolve()
+        if args.video_flag and args.video:
+            print(
+                "错误: 不要同时指定第二位置参数与 --video，请只保留其一。",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        vp = Path(raw_vp).resolve()
         if not vp.is_file():
             print(f"错误: 找不到文件: {vp}", file=sys.stderr)
             sys.exit(1)
@@ -1083,7 +1100,9 @@ def main() -> None:
             raise
         return
 
-    if args.video:
+    if args.video_flag:
+        vp = Path(args.video_flag).resolve()
+    elif args.video:
         vp = Path(args.video).resolve()
     else:
         fp = _default_bilingual_mp4()
