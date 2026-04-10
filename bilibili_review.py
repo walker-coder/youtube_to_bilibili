@@ -26,9 +26,15 @@
   # 或：python bilibili_review.py BV1xxxxxxxxxx --replace-only --video video_subs/yt_xxx_bilingual_recut.mp4
   # 勿写成 BV号 --replace-only 路径（若脚本未识别 --replace-only，路径会被当成多余参数报错）
 
-替换后继续自动轮询（再退回则按退回说明剪片并替换，与流水线步骤 5 一致）：
-  python bilibili_review.py BV1xxxxxxxxxx video_subs/yt_xxx_bilingual_recut.mp4 --replace-only --resume-review
-  # 若已只做过 --replace-only，也可补跑（不再次上传）：python bilibili_review.py BV1xx video_subs/yt_xxx_bilingual_recut.mp4
+推荐流程（先查原因 → 本地改片 → 再上传）：
+  1) python bilibili_review.py BV1xxxxxxxxxx --query-reject
+     （只查当前审核状态与退回说明、解析时间段；不剪片、不上传）
+  2) 按说明在本地修改/重编码成片后
+  3) python bilibili_review.py BV1xxxxxxxxxx video_subs/你的成片.mp4 --replace-only
+     需要替换后继续自动轮询再加: --resume-review
+
+仅「替换并接着轮询」一条命令（不先查原因时）：
+  python bilibili_review.py BV1xx video_subs/yt_xxx_bilingual_recut.mp4 --replace-only --resume-review
 
 第一个参数必须是哔哩哔哩「稿件 BV 号」（创作中心或视频页地址里的 BVxxxxxxxx，共 12 位），
 不要使用 YouTube 视频 ID（如 yt_xxxx_bilingual 里的 11 位 ID），否则接口会返回 -400。
@@ -1027,6 +1033,71 @@ def run_replace_video_only_sync(bvid: str, mp4: str | Path) -> None:
     asyncio.run(_replace_video_only_async(bvid, Path(mp4).resolve()))
 
 
+async def _query_reject_reason_only_async(bvid: str) -> None:
+    """只查询创作中心接口：状态、退回说明、可解析时间段；不剪片、不替换。"""
+    from upload_bilibili import _load_local_env
+
+    _load_local_env()
+    credential = _credential()
+    ok = await credential.check_valid()
+    if not ok:
+        raise RuntimeError("Cookie 无效或已过期，请重新导出 bilibili_cookie.env")
+
+    archive_json, page_state = await _fetch_review_data(bvid, credential)
+    status = classify_review(archive_json, page_state)
+    api_fp = _write_review_api_json(bvid, archive_json, page_state)
+    print(f"稿件 {bvid} 接口快照已写入: {api_fp}")
+    _maybe_print_full_review_json(api_fp)
+
+    if status == "passed":
+        print("\n当前状态：审核通过（或接口文案判定为已通过）。")
+        arc = archive_json.get("archive")
+        if isinstance(arc, dict):
+            print(f"  archive.state = {arc.get('state')!r}")
+        print("无需剪片替换。")
+        return
+
+    if status == "pending":
+        print(
+            "\n当前状态：审核中 / 待判定（未从接口合并文案中识别明确「已退回」或「审核通过」）。"
+        )
+        print_bilibili_review_content(archive_json, page_state)
+        print(
+            "\n未执行剪片、未上传。若之后被退回，可再运行本命令（加 --query-reject）查看说明。"
+        )
+        return
+
+    print("\n当前状态：已退回。以下为退回说明（未执行任何剪片或替换分 P）。\n")
+    print_bilibili_review_content(archive_json, page_state)
+    print("  哔哩哔哩审核：已退回，解析需删除的时间段（仅供参考）…")
+    ranges, range_source = extract_time_ranges_for_review(archive_json, page_state)
+    if range_source != "无":
+        print(f"  区间解析来源: {range_source}")
+    blob = _review_text_blob(archive_json, page_state)
+    if not ranges:
+        _print_reject_response_preview(bvid, archive_json, page_state, blob)
+        fp = _write_reject_debug_text(bvid, blob)
+        print(f"  未解析到可自动剪片的时间段，原文已写入: {fp}")
+    else:
+        merged_in = _merge_ranges(ranges)
+        parts = [
+            f"{_format_seconds_as_hms(a)}–{_format_seconds_as_hms(b)}"
+            for a, b in merged_in
+        ]
+        print(f"  解析到需处理时间段（合并后）: " + "；".join(parts))
+
+    print(
+        "\n---\n"
+        "未执行剪片、未替换分 P。请根据说明在本地修改成片后执行：\n"
+        f"  python bilibili_review.py {bvid} video_subs/你的成片.mp4 --replace-only\n"
+        "  若替换后需继续自动轮询（再退回再剪再传）: 再加 --resume-review"
+    )
+
+
+def run_query_reject_reason_only_sync(bvid: str) -> None:
+    asyncio.run(_query_reject_reason_only_async(bvid))
+
+
 def _default_bilingual_mp4() -> Path | None:
     from paths_config import VIDEO_SUBS_DIR
 
@@ -1069,6 +1140,11 @@ def main() -> None:
         action="store_true",
         help="与 --replace-only 连用：替换成功后继续轮询审核；再退回则剪片替换（多轮）",
     )
+    ap.add_argument(
+        "--query-reject",
+        action="store_true",
+        help="只查询审核状态与退回说明（含解析时间段），不剪片、不上传；改完片后再用 --replace-only",
+    )
     args = ap.parse_args()
     try:
         bvid = normalize_bvid_cli_arg(args.bvid)
@@ -1083,6 +1159,20 @@ def main() -> None:
             file=sys.stderr,
         )
         sys.exit(2)
+    if args.query_reject:
+        if args.replace_only or args.resume_review or args.video or args.video_flag:
+            print(
+                "错误: --query-reject 只需 BV 号，请勿加视频路径或 --replace-only / --resume-review",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        try:
+            run_query_reject_reason_only_sync(bvid)
+        except RuntimeError as e:
+            print(f"错误: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
     if args.replace_only:
         raw_vp = args.video_flag or args.video
         if not raw_vp:
