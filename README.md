@@ -53,7 +53,7 @@ python youtube_to_bilibili.py "https://www.youtube.com/watch?v=..."
 - 视频与中间文件默认在 `video_subs/`（目录已加入 `.gitignore`）。流水线**成功结束后**会删除当前视频的中间文件，**只保留** `yt_<视频ID>_bilingual.mp4`（其它视频 ID 的文件不删）。
 - B 站标题默认在 YouTube 上传日期的前加前缀（`M/D/YYYY`），再接原标题；可用 `--title` 覆盖。
 - 若需只生成本地双语视频、不上传：加 `--no-upload`。
-- 若不需要上传后轮询审核与自动剪片：加 `--no-review-wait`。
+- 若不需要上传后轮询审核与自动剪片：加 `--no-review-wait`（之后若要按退稿处理，见下节「退稿与替换稿件流程」）。
 - 其它说明见 `youtube_to_bilibili.py` 文件头注释。
 
 ### 后台运行（Linux / macOS / SSH）
@@ -87,12 +87,100 @@ python resume_youtube_pipeline.py --from upload --vid 视频ID --url "..."
 
 只生成本地双语、不上传时可加 `--no-upload`（此时可不传 `--url`）。参数 `--title`、`--no-review-wait`、`--cookies` 等与一键脚本含义一致。
 
+## 退稿与替换稿件流程（`bilibili_review.py`）
+
+默认情况下，`youtube_to_bilibili.py` 上传成功后会**轮询审核**；若退回且说明中能解析出时间轴，会**自动剪片并替换分 P**，可多轮直到通过或超时（环境变量见下节）。
+
+若你希望**先看清退稿原因、在本地改好成片再上传**，或替换接口曾报「获取 upload_id」等错误需要分步操作，可按下面顺序使用 **`bilibili_review.py`**（须在项目根目录、已配置 `bilibili_cookie.env`）。
+
+### 1. 只查询当前状态与退稿说明（不剪片、不上传）
+
+```bash
+python bilibili_review.py BV1xxxxxxxxxx --query-reject
+```
+
+会拉取创作中心接口，打印审核/退稿文案；若能解析，会列出**建议处理的时间段**（与自动剪片逻辑一致）。接口快照会写入 `logs/bilibili_review_api_<BV>_*.json`。**不会**执行 ffmpeg、**不会**替换视频。
+
+### 2. 直接按退稿说明自动剪出本地 `*_recut.mp4`（不上传）
+
+若你希望脚本先按当前 BV 的退稿时间段帮你剪好本地视频，再决定是否上传，可直接复用内置 ffmpeg 剪片逻辑：
+
+```bash
+python bilibili_review.py BV1xxxxxxxxxx ./video_subs/你的成片.mp4 --recut-only
+```
+
+或使用：
+
+```bash
+python bilibili_review.py BV1xxxxxxxxxx --recut-only --video ./video_subs/你的成片.mp4
+```
+
+脚本会：
+
+- 查询当前 BV 的退稿说明
+- 解析时间段并应用 `BILIBILI_REVIEW_RECUT_PAD_SEC`
+- 基于你提供的本地 MP4 生成同目录下的 `*_recut.mp4`
+- **不会**上传、**不会**替换分 P
+
+若当前稿件不是「已退回」，或未解析到时间段，命令会直接报错并停下，不会误剪视频。
+
+### 3. 本地修改成片
+
+你可以：
+
+- 直接使用上一步生成的 `*_recut.mp4`
+- 或按退稿说明继续手动剪辑/重编码，得到准备替换的 MP4
+
+例如：`video_subs/yt_<视频ID>_bilingual_recut.mp4`
+
+### 4. 仅上传并替换该 BV 的分 P
+
+路径请紧接 BV 号，**`--replace-only` 放在路径之后**，避免参数被误解析：
+
+```bash
+python bilibili_review.py BV1xxxxxxxxxx ./video_subs/你的成片.mp4 --replace-only
+```
+
+或使用：
+
+```bash
+python bilibili_review.py BV1xxxxxxxxxx --replace-only --video ./video_subs/你的成片.mp4
+```
+
+若 UPOS 上传报错，可在服务器上设置 `BILIBILI_UPLOAD_LINE`（如 `bda2`），或升级 `bilibili-api-python`、检查 Cookie 与网络；详见 `bilibili_review.py` 文件头注释。
+
+### 5. （可选）替换后继续自动轮询
+
+替换成功后若仍希望**继续**由脚本轮询；若再次退稿则再按时间轴剪片并替换（与流水线步骤 5 相同逻辑），可在上一步追加 **`--resume-review`**：
+
+```bash
+python bilibili_review.py BV1xxxxxxxxxx ./video_subs/你的成片.mp4 --replace-only --resume-review
+```
+
+### 不上传、只轮询与自动剪片替换
+
+若已通过 **`--query-reject`** 看过原因，且本地已改好成片，也可**不**用 `--replace-only`，直接以该成片为基准进入完整轮询（再退稿则自动剪片替换）：
+
+```bash
+python bilibili_review.py BV1xxxxxxxxxx ./video_subs/你的成片.mp4
+```
+
+第二参数省略时，脚本会选用 `video_subs/` 下最新的 `*_bilingual.mp4`，一般用于首次补跑轮询，不一定适合已改名的 recut 成片，**建议显式写出 MP4 路径**。
+
+### 与一键流水线的关系
+
+| 场景 | 做法 |
+|------|------|
+| 全程自动（上传 → 轮询 → 退稿则剪片替换） | 默认运行 `youtube_to_bilibili.py`，且**不要**加 `--no-review-wait` |
+| 上传后不自动处理退稿 | 加 `--no-review-wait`，再按本节步骤 1～4（及可选 5）手动处理 |
+| 只想查原因 | 仅用步骤 1：`--query-reject` |
+
 ## 其它脚本
 
 | 脚本 | 说明 |
 |------|------|
 | `upload_bilibili.py` | 单独上传本地 MP4 到 B 站（需同上 Cookie） |
-| `bilibili_review.py` | 对已投稿 BV 轮询审核；退回则按 `【HH:MM:SS-HH:MM:SS】` 剪片并替换稿件。可单独执行：`python bilibili_review.py BVxxx [可选：本地双语mp4路径]` |
+| `bilibili_review.py` | 轮询审核、退稿剪片替换；**仅查退稿** `--query-reject`；**仅本地剪片** `BV … 路径 --recut-only`；**仅替换分 P** `BV … 路径 --replace-only`；**替换后继续轮询** 再加 `--resume-review`。详见上节 |
 | `download_bloomberg_china_show.py` | 按搜索词下载 Bloomberg「China Show」相关视频到 `video_subs/` |
 | `bilingual_subs_to_video.py` | 将英/中字幕烧录进视频（流水线内部会调用） |
 | `translate_subs_to_zh_hans.py` / `vtt_to_srt.py` | 翻译与字幕格式转换 |
@@ -102,7 +190,12 @@ python resume_youtube_pipeline.py --from upload --vid 视频ID --url "..."
 ## 审核轮询（可选环境变量）
 
 - `BILIBILI_REVIEW_POLL_INTERVAL_SEC`：轮询间隔（秒），默认 `30`
-- `BILIBILI_REVIEW_MAX_WAIT_SEC`：最长等待（秒），默认 `7200`
+- `BILIBILI_REVIEW_MAX_WAIT_SEC`：单轮最长等待（秒），默认 `7200`；替换后会开启新一轮轮询
+- `BILIBILI_REVIEW_MAX_REPLACE_ROUNDS`：最多剪片替换轮数，默认 `20`
+- `BILIBILI_REVIEW_RECUT_PAD_SEC`：解析出的每段删除区间左右各扩展秒数，默认 `1.0`
+- `BILIBILI_UPLOAD_LINE`：替换稿件时 UPOS 上传线路，可选 `bda2` / `qn` / `ws` / `bldsa`（小写）；不设时库内会依次尝试多线
+
+更多说明见 `bilibili_review.py` 文件头。
 
 ## 免责声明
 

@@ -1098,6 +1098,86 @@ def run_query_reject_reason_only_sync(bvid: str) -> None:
     asyncio.run(_query_reject_reason_only_async(bvid))
 
 
+async def _recut_rejected_video_only_async(bvid: str, mp4: Path) -> Path:
+    """按当前 BV 的退回说明裁剪本地视频，输出 *_recut.mp4；不替换分 P。"""
+    from upload_bilibili import _load_local_env
+
+    _load_local_env()
+    credential = _credential()
+    ok = await credential.check_valid()
+    if not ok:
+        raise RuntimeError("Cookie 无效或已过期，请重新导出 bilibili_cookie.env")
+
+    current = Path(mp4).resolve()
+    if not current.is_file():
+        raise FileNotFoundError(f"找不到文件: {current}")
+
+    archive_json, page_state = await _fetch_review_data(bvid, credential)
+    status = classify_review(archive_json, page_state)
+    api_fp = _write_review_api_json(bvid, archive_json, page_state)
+    print(f"稿件 {bvid} 接口快照已写入: {api_fp}")
+    _maybe_print_full_review_json(api_fp)
+
+    if status == "passed":
+        print("当前状态：审核通过，无需剪片。")
+        return current
+    if status != "rejected":
+        raise RuntimeError("当前未识别为“已退回”，不会执行剪片。可先用 --query-reject 查看状态。")
+
+    print("当前状态：已退回。以下按退回说明裁剪本地视频（不上传）。")
+    print_bilibili_review_content(archive_json, page_state)
+    print("  哔哩哔哩审核：已退回，解析需删除的时间段…")
+    ranges, range_source = extract_time_ranges_for_review(archive_json, page_state)
+    if range_source != "无":
+        print(f"  区间解析来源: {range_source}")
+    blob = _review_text_blob(archive_json, page_state)
+    if not ranges:
+        _print_reject_response_preview(bvid, archive_json, page_state, blob)
+        fp = _write_reject_debug_text(bvid, blob)
+        print(f"  未解析到时间段，完整接口原文已写入: {fp}")
+        raise RuntimeError("退回说明中未解析到可自动剪片的时间段，无法执行 --recut-only。")
+
+    merged_in = _merge_ranges(ranges)
+    dur = _ffprobe_duration(current)
+    try:
+        pad = float(os.environ.get("BILIBILI_REVIEW_RECUT_PAD_SEC", "1.0").strip() or "0")
+    except ValueError:
+        pad = 1.0
+    ranges_for_cut = _expand_remove_ranges_with_padding(
+        merged_in,
+        pad_sec=pad,
+        duration_sec=dur,
+    )
+    parts = [f"{_format_seconds_as_hms(a)}–{_format_seconds_as_hms(b)}" for a, b in merged_in]
+    print(f"  从退回说明解析到 {len(merged_in)} 段需删除区间（合并后）: " + "；".join(parts))
+    if len(merged_in) != len(ranges):
+        print(f"  （原始解析 {len(ranges)} 段，重叠/相邻合并为 {len(merged_in)} 段）")
+    if pad > 0 and ranges_for_cut:
+        parts_cut = [
+            f"{_format_seconds_as_hms(a)}–{_format_seconds_as_hms(b)}"
+            for a, b in ranges_for_cut
+        ]
+        print(
+            f"  每段左右各扩展 {pad:g}s 后实际剪除（共 {len(ranges_for_cut)} 段）: "
+            + "；".join(parts_cut)
+        )
+    elif pad <= 0:
+        print("  （BILIBILI_REVIEW_RECUT_PAD_SEC=0，未做左右扩展）")
+
+    out = current.with_name(current.stem + "_recut.mp4")
+    ffmpeg_remove_time_ranges(current, out, ranges_for_cut)
+    print(f"已剪除指定片段，输出: {out}")
+    print(
+        "未执行上传。若要替换稿件，请执行：\n"
+        f"  python bilibili_review.py {bvid} \"{out}\" --replace-only"
+    )
+    return out
+
+
+def run_recut_rejected_video_only_sync(bvid: str, mp4: str | Path) -> Path:
+    return asyncio.run(_recut_rejected_video_only_async(bvid, Path(mp4).resolve()))
+
+
 def _default_bilingual_mp4() -> Path | None:
     from paths_config import VIDEO_SUBS_DIR
 
@@ -1145,6 +1225,11 @@ def main() -> None:
         action="store_true",
         help="只查询审核状态与退回说明（含解析时间段），不剪片、不上传；改完片后再用 --replace-only",
     )
+    ap.add_argument(
+        "--recut-only",
+        action="store_true",
+        help="按当前退回说明裁剪你指定的本地视频，生成 *_recut.mp4；不上传",
+    )
     args = ap.parse_args()
     try:
         bvid = normalize_bvid_cli_arg(args.bvid)
@@ -1160,15 +1245,48 @@ def main() -> None:
         )
         sys.exit(2)
     if args.query_reject:
-        if args.replace_only or args.resume_review or args.video or args.video_flag:
+        if args.replace_only or args.resume_review or args.recut_only or args.video or args.video_flag:
             print(
-                "错误: --query-reject 只需 BV 号，请勿加视频路径或 --replace-only / --resume-review",
+                "错误: --query-reject 只需 BV 号，请勿加视频路径或 --replace-only / --resume-review / --recut-only",
                 file=sys.stderr,
             )
             sys.exit(2)
         try:
             run_query_reject_reason_only_sync(bvid)
         except RuntimeError as e:
+            print(f"错误: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if args.recut_only:
+        raw_vp = args.video_flag or args.video
+        if not raw_vp:
+            print(
+                "错误: --recut-only 须指定视频路径。示例：\n"
+                f"  python bilibili_review.py {bvid} video_subs/yt_xxx_bilingual.mp4 --recut-only\n"
+                f"  或: python bilibili_review.py {bvid} --recut-only --video video_subs/yt_xxx_bilingual.mp4",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if args.video_flag and args.video:
+            print(
+                "错误: 不要同时指定第二位置参数与 --video，请只保留其一。",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if args.replace_only or args.resume_review:
+            print(
+                "错误: --recut-only 不可与 --replace-only / --resume-review 同时使用。",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        vp = Path(raw_vp).resolve()
+        if not vp.is_file():
+            print(f"错误: 找不到文件: {vp}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            run_recut_rejected_video_only_sync(bvid, vp)
+        except (RuntimeError, TimeoutError, FileNotFoundError) as e:
             print(f"错误: {e}", file=sys.stderr)
             sys.exit(1)
         return
