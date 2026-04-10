@@ -13,11 +13,16 @@
   退回时**必定**将 upload_args 与 page_state 的完整 JSON 写入 logs/bilibili_review_api_<BV>_<时间>.json，便于对照网页扩展正则。
   BILIBILI_REVIEW_PRINT_FULL_JSON=1 时同时将完整 JSON 打印到终端（体积大）。
   BILIBILI_REVIEW_RECUT_PAD_SEC  对解析出的每段删除区间左右各扩展的秒数（默认 1.0）；设为 0 关闭。
+  BILIBILI_UPLOAD_LINE  替换稿件时走 UPOS 上传，若报「获取 upload_id 错误」可指定线路：bda2 / qn / ws / bldsa（小写）。
+                          不设时依次尝试：自动测速、bda2、qn、ws。
 
 单独补跑（已上传过、未走流水线步骤 5 时）：
   python bilibili_review.py BV1DhX1BVESJ
   python bilibili_review.py BV1DhX1BVESJ video_subs/yt_xxx_bilingual.mp4
   第二参数省略时自动选 video_subs 下最新 *_bilingual.mp4
+
+仅替换视频（本地已剪好 recut / 成片，只上传覆盖分 P、不轮询、不自动剪片）：
+  python bilibili_review.py BV1xxxxxxxxxx --replace-only video_subs/yt_xxx_bilingual_recut.mp4
 
 第一个参数必须是哔哩哔哩「稿件 BV 号」（创作中心或视频页地址里的 BVxxxxxxxx，共 12 位），
 不要使用 YouTube 视频 ID（如 yt_xxxx_bilingual 里的 11 位 ID），否则接口会返回 -400。
@@ -694,6 +699,27 @@ async def _fetch_review_data(bvid: str, credential) -> tuple[dict, dict | None]:
     return archive_json, page_state
 
 
+def _replace_upload_line_attempts() -> list[tuple[str, object]]:
+    """(日志标签, Lines|None)。None 表示 _choose_line 内联测速。"""
+    from bilibili_api.video_uploader import Lines
+
+    raw = (os.environ.get("BILIBILI_UPLOAD_LINE") or "").strip().lower()
+    m = {
+        "bda2": Lines.BDA2,
+        "qn": Lines.QN,
+        "ws": Lines.WS,
+        "bldsa": Lines.BLDSA,
+    }
+    if raw:
+        if raw not in m:
+            print(
+                f"  警告: BILIBILI_UPLOAD_LINE={raw!r} 无效（应为 bda2/qn/ws/bldsa），改用自动测速"
+            )
+            return [("probe", None)]
+        return [(raw, m[raw])]
+    return [("probe", None), ("bda2", Lines.BDA2), ("qn", Lines.QN), ("ws", Lines.WS)]
+
+
 def _parse_tags(tag_field) -> list[str]:
     if tag_field is None:
         return ["转载"]
@@ -767,6 +793,7 @@ async def _replace_video_edit(
     new_video_path: Path,
     credential,
 ) -> dict:
+    from bilibili_api.exceptions.ApiException import ApiException
     from bilibili_api.utils.network import Api
     from bilibili_api.utils.utils import get_api
     from bilibili_api.video_uploader import VideoMeta, VideoUploaderPage, _choose_line
@@ -794,9 +821,22 @@ async def _replace_video_edit(
         title=str(v0.get("title") or arc.get("title", ""))[:80],
         description=str(v0.get("desc") or arc.get("desc", ""))[:2000],
     )
-    line = await _choose_line(None)
-    uploader = _ReplaceVideoUploader(bvid, credential, meta, page, line)
-    return await uploader.start()
+
+    attempts = _replace_upload_line_attempts()
+    for idx, (label, line_enum) in enumerate(attempts):
+        line = await _choose_line(line_enum)
+        print(f"  替换稿件视频：上传线路={label}")
+        uploader = _ReplaceVideoUploader(bvid, credential, meta, page, line)
+        try:
+            return await uploader.start()
+        except ApiException as e:
+            err_s = str(e)
+            is_uid = "upload_id" in err_s or "获取 upload_id" in err_s
+            if is_uid and idx < len(attempts) - 1:
+                print(f"  UPOS 预上传失败，换线重试… ({err_s[:160]})")
+                await asyncio.sleep(3.0 + idx * 2.0)
+                continue
+            raise
 
 
 def _credential():
@@ -963,6 +1003,24 @@ def run_review_flow_sync(bvid: str, bilingual_mp4: str | Path) -> None:
     asyncio.run(poll_and_repair_rejected(bvid, Path(bilingual_mp4).resolve()))
 
 
+async def _replace_video_only_async(bvid: str, mp4: Path) -> None:
+    """仅调用 UPOS 上传并走编辑接口替换分 P，不轮询审核。"""
+    from upload_bilibili import _load_local_env
+
+    _load_local_env()
+    credential = _credential()
+    ok = await credential.check_valid()
+    if not ok:
+        raise RuntimeError("Cookie 无效或已过期，请重新导出 bilibili_cookie.env")
+    print(f"仅替换稿件视频: {bvid} ← {mp4}")
+    await _replace_video_edit(bvid, mp4, credential)
+    print("替换已提交，请在哔哩哔哩创作中心查看审核状态。")
+
+
+def run_replace_video_only_sync(bvid: str, mp4: str | Path) -> None:
+    asyncio.run(_replace_video_only_async(bvid, Path(mp4).resolve()))
+
+
 def _default_bilingual_mp4() -> Path | None:
     from paths_config import VIDEO_SUBS_DIR
 
@@ -986,7 +1044,12 @@ def main() -> None:
         "video",
         nargs="?",
         default=None,
-        help=f"本地双语 MP4（与首次投稿一致）；省略则用 {VIDEO_SUBS_DIR.name} 下最新 *_bilingual.mp4",
+        help=f"本地 MP4；省略则用 {VIDEO_SUBS_DIR.name} 下最新 *_bilingual.mp4（--replace-only 时必须指定）",
+    )
+    ap.add_argument(
+        "--replace-only",
+        action="store_true",
+        help="只上传并替换该 BV 的分 P，不轮询审核、不解析退回、不剪片",
     )
     args = ap.parse_args()
     try:
@@ -994,6 +1057,32 @@ def main() -> None:
     except ValueError as e:
         print(f"错误: {e}", file=sys.stderr)
         sys.exit(2)
+    if args.replace_only:
+        if not args.video:
+            print(
+                "错误: --replace-only 须指定本地视频路径，例如 "
+                f"video_subs/yt_xxx_bilingual_recut.mp4",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        vp = Path(args.video).resolve()
+        if not vp.is_file():
+            print(f"错误: 找不到文件: {vp}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            run_replace_video_only_sync(bvid, vp)
+        except (RuntimeError, FileNotFoundError) as e:
+            print(f"错误: {e}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as e:
+            from bilibili_api.exceptions.ApiException import ApiException
+
+            if isinstance(e, ApiException):
+                print(f"错误: B 站接口: {e}", file=sys.stderr)
+                sys.exit(1)
+            raise
+        return
+
     if args.video:
         vp = Path(args.video).resolve()
     else:
