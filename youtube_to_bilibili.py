@@ -19,7 +19,7 @@
 - 若下载仍慢：先 yt-dlp -U；再配合 cookies 常能缓解限速。
 - B 站投稿标题：默认会先去掉 YouTube 原标题末尾「| The China Show M/D/YYYY」（及可选尾随 |），再格式化为「清理后标题或 --title | YYYY/MM/DD」（YouTube upload_date）；无上传日期元数据时仅用标题。
 - 上传成功后会轮询创作中心审核：若「已退回」且稿件问题中含【HH:MM:SS-HH:MM:SS】，则剪除对应片段并替换稿件后结束（不再轮询）。可用 --no-review-wait 关闭。环境变量见 bilibili_review.py。
-- 流水线最后一步会清理 **video_subs/** 下当前视频的中间文件（下载的 mp4、vtt、srt 等），**仅保留** `yt_<视频ID>_bilingual.mp4`；其它视频 ID 的文件不受影响。
+- 仅当**已上传且 B 站审核通过**后，流水线最后一步才会清理 **video_subs/** 下当前视频在本次流程产生的文件（下载的 mp4、vtt、srt、双语成片、recut 等）；其它视频 ID 的文件不受影响。若中途报错、审核失败、使用 `--no-upload` 或 `--no-review-wait`，则不会自动删除文件。
 - 若链接含 &list=（播放列表），脚本已默认 noplaylist，只处理当前 watch?v= 视频；也可手动改成仅 https://www.youtube.com/watch?v=视频ID 。
 - 若使用 cookies 后出现「Requested format is not available」：cookie 已生效，但带登录态时需通过 YouTube 验证，本机须安装 Deno/Node 等（见 https://github.com/yt-dlp/yt-dlp/wiki/EJS ）。脚本会先带 cookie 下载，失败则自动去掉 cookie 重试。可选环境变量：YTDLP_DENO_PATH / YTDLP_NODE_PATH 指向 deno.exe、node.exe（未加入 PATH 时）。
 - 云服务器常见 IPv6 不通导致连接失败：默认启用 yt-dlp 的 force_ipv4（等同 --force-ipv4）。若需走 IPv6，设置环境变量 YTDLP_FORCE_IPV4=0。
@@ -179,15 +179,12 @@ def _find_en_vtt(video_id: str) -> Path:
     )
 
 
-def _cleanup_video_subs_keep_bilingual_only(vid: str) -> None:
-    """删除 video_subs 下与当前视频 ID 相关的中间文件，仅保留 yt_{vid}_bilingual.mp4（不删其它视频前缀）。"""
-    keep_name = f"yt_{vid}_bilingual.mp4"
+def _cleanup_video_subs_remove_all_for_video(vid: str) -> None:
+    """删除 video_subs 下与当前视频 ID 相关的全部文件（不删其它视频前缀）。"""
     ensure_video_subs_dir()
     removed: list[str] = []
     for p in sorted(VIDEO_SUBS_DIR.glob(f"yt_{vid}*")):
         if not p.is_file():
-            continue
-        if p.name == keep_name:
             continue
         try:
             p.unlink()
@@ -202,7 +199,32 @@ def _cleanup_video_subs_keep_bilingual_only(vid: str) -> None:
                 f"  已删除中间文件（{len(removed)} 个）: {', '.join(removed[:15])} …"
             )
     else:
-        print(f"  无其它 yt_{vid}* 文件需删除。")
+        print(f"  无 yt_{vid}* 文件需删除。")
+
+
+def _cleanup_video_subs_all() -> None:
+    """清空 video_subs 文件夹下的所有文件（包括子目录中的文件）。"""
+    ensure_video_subs_dir()
+    removed: list[str] = []
+    for p in sorted(VIDEO_SUBS_DIR.rglob("*")):
+        if p.is_file():
+            try:
+                p.unlink()
+                removed.append(p.name)
+            except OSError as e:
+                print(f"  警告：无法删除 {p.name}: {e}", file=sys.stderr)
+        elif p.is_dir() and p != VIDEO_SUBS_DIR:
+            try:
+                p.rmdir()
+            except OSError:
+                pass  # 目录非空时忽略，文件已删除后可能为空也可能仍有内容
+    if removed:
+        if len(removed) <= 15:
+            print(f"  已清空 video_subs（{len(removed)} 个文件）: {', '.join(removed)}")
+        else:
+            print(f"  已清空 video_subs（{len(removed)} 个文件）: {', '.join(removed[:15])} …")
+    else:
+        print("  video_subs 文件夹已为空。")
 
 
 def _is_unavailable_format_error(e: BaseException) -> bool:
@@ -457,7 +479,7 @@ def run_pipeline(
     no_review_wait: bool = False,
     from_step: int = 1,
 ) -> Path:
-    # 最后一步：清理 video_subs 内本视频中间文件，仅保留 yt_{vid}_bilingual.mp4
+    # 最后一步：仅在已上传且审核通过后，清理 video_subs 内本视频在本次流程产生的全部文件
     total_steps = (
         6
         if (not no_upload and not no_review_wait)
@@ -559,8 +581,7 @@ def run_pipeline(
 
     if no_upload:
         print("已跳过上传（--no-upload）。")
-        print(f"步骤 {total_steps}/{total_steps}：清理 video_subs（仅保留双语成片）…")
-        _cleanup_video_subs_keep_bilingual_only(vid)
+        print("已保留本次流程文件（--no-upload 不自动清理）。")
         return out_bilingual
 
     review_after = not no_review_wait
@@ -598,8 +619,10 @@ def run_pipeline(
         from bilibili_review import run_review_flow_sync
 
         run_review_flow_sync(bvid, out_bilingual)
-    print(f"步骤 {total_steps}/{total_steps}：清理 video_subs（仅保留双语成片）…")
-    _cleanup_video_subs_keep_bilingual_only(vid)
+        print(f"步骤 {total_steps}/{total_steps}：清理 video_subs（审核通过后清空整个文件夹）…")
+        _cleanup_video_subs_all()
+    else:
+        print("已保留本次流程文件（--no-review-wait 未等待审核通过，不自动清理）。")
     return out_bilingual
 
 
