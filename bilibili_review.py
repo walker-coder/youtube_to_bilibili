@@ -33,6 +33,9 @@
   3) python bilibili_review.py BV1xxxxxxxxxx video_subs/你的成片.mp4 --replace-only
      需要替换后继续自动轮询再加: --resume-review
 
+一条命令（先查退回原因 → 自动剪片 → 替换上传 → 继续轮询，再退再处理）：
+  python bilibili_review.py BV1xx video_subs/yt_xxx_bilingual.mp4 --auto-repair
+
 仅「替换并接着轮询」一条命令（不先查原因时）：
   python bilibili_review.py BV1xx video_subs/yt_xxx_bilingual_recut.mp4 --replace-only --resume-review
 
@@ -863,6 +866,103 @@ def _credential():
     return Credential(sessdata=sess, bili_jct=jct, buvid3=buvid, dedeuserid=dede)
 
 
+def _recut_pad_seconds() -> float:
+    try:
+        return float(os.environ.get("BILIBILI_REVIEW_RECUT_PAD_SEC", "1.0").strip() or "0")
+    except ValueError:
+        return 1.0
+
+
+def _diagnose_reject_and_parse_ranges(
+    bvid: str,
+    archive_json: dict,
+    page_state: dict,
+    current: Path,
+    *,
+    step_label: str = "",
+) -> list[tuple[float, float]]:
+    """打印退回说明并解析需删除区间；返回扩展后用于 ffmpeg 剪片的区间。"""
+    text = _review_text_blob(archive_json, page_state)
+    prefix = f"{step_label} " if step_label else ""
+    print(f"{prefix}哔哩哔哩审核：已退回，解析需删除的时间段…")
+    ranges, range_source = extract_time_ranges_for_review(archive_json, page_state)
+    if range_source != "无":
+        print(f"  区间解析来源: {range_source}")
+    if not ranges:
+        _print_reject_response_preview(bvid, archive_json, page_state, text)
+        fp = _write_reject_debug_text(bvid, text)
+        print(f"  未解析到时间段，完整接口原文已写入: {fp}")
+        raise RuntimeError(
+            "退回稿件中未解析到可识别的起止时间（已支持【HH:MM:SS-HH:MM:SS】、毫秒、"
+            "从/至/到、纯秒区间带「秒」字等）。请对照上方终端预览与日志文件；"
+            "把「嵌套字段节选」或合并字符串里含时间的片段发开发者即可扩展正则。"
+        )
+    merged_in = _merge_ranges(ranges)
+    dur = _ffprobe_duration(current)
+    pad = _recut_pad_seconds()
+    ranges_for_cut = _expand_remove_ranges_with_padding(
+        merged_in,
+        pad_sec=pad,
+        duration_sec=dur,
+    )
+    parts = [
+        f"{_format_seconds_as_hms(a)}–{_format_seconds_as_hms(b)}"
+        for a, b in merged_in
+    ]
+    print(
+        f"  从退回说明解析到 {len(merged_in)} 段需删除区间（合并后）: "
+        + "；".join(parts)
+    )
+    if len(merged_in) != len(ranges):
+        print(
+            f"  （原始解析 {len(ranges)} 段，重叠/相邻合并为 {len(merged_in)} 段）"
+        )
+    if pad > 0 and ranges_for_cut:
+        parts_cut = [
+            f"{_format_seconds_as_hms(a)}–{_format_seconds_as_hms(b)}"
+            for a, b in ranges_for_cut
+        ]
+        print(
+            f"  每段左右各扩展 {pad:g}s 后实际剪除（共 {len(ranges_for_cut)} 段）: "
+            + "；".join(parts_cut)
+        )
+    elif pad <= 0:
+        print("  （BILIBILI_REVIEW_RECUT_PAD_SEC=0，未做左右扩展）")
+    return ranges_for_cut
+
+
+async def _repair_rejected_clip_and_replace(
+    bvid: str,
+    current: Path,
+    original_bilingual: Path,
+    archive_json: dict,
+    page_state: dict,
+    credential,
+    *,
+    step_label: str = "",
+) -> Path:
+    """按退回说明剪片并替换分 P；返回剪片后的路径。"""
+    ranges_for_cut = _diagnose_reject_and_parse_ranges(
+        bvid,
+        archive_json,
+        page_state,
+        current,
+        step_label=step_label,
+    )
+    out = current.with_name(current.stem + "_recut.mp4")
+    ffmpeg_remove_time_ranges(current, out, ranges_for_cut)
+    print(f"  已剪除指定片段，输出: {out}")
+    if current.resolve() != original_bilingual.resolve():
+        try:
+            current.unlink()
+            print(f"  已删除上一轮中间文件: {current.name}")
+        except OSError as e:
+            print(f"  警告: 删除中间文件失败（可手动删）: {current} — {e}")
+    print("  正在替换稿件视频并重新提交…")
+    await _replace_video_edit(bvid, out, credential)
+    return out
+
+
 async def poll_and_repair_rejected(
     bvid: str,
     bilingual_mp4: Path,
@@ -913,7 +1013,6 @@ async def poll_and_repair_rejected(
             n += 1
             archive_json, page_state = await _fetch_review_data(bvid, credential)
             status = classify_review(archive_json, page_state)
-            text = _review_text_blob(archive_json, page_state)
 
             if status == "passed":
                 print("  哔哩哔哩审核：已通过。")
@@ -930,72 +1029,14 @@ async def poll_and_repair_rejected(
                 )
                 _maybe_print_full_review_json(api_fp)
                 print_bilibili_review_content(archive_json, page_state)
-                print("  哔哩哔哩审核：已退回，解析需删除的时间段…")
-                ranges, range_source = extract_time_ranges_for_review(
-                    archive_json, page_state
+                current = await _repair_rejected_clip_and_replace(
+                    bvid,
+                    current,
+                    original_bilingual,
+                    archive_json,
+                    page_state,
+                    credential,
                 )
-                if range_source != "无":
-                    print(f"  区间解析来源: {range_source}")
-                if not ranges:
-                    _print_reject_response_preview(
-                        bvid, archive_json, page_state, text
-                    )
-                    fp = _write_reject_debug_text(bvid, text)
-                    print(f"  未解析到时间段，完整接口原文已写入: {fp}")
-                    raise RuntimeError(
-                        "退回稿件中未解析到可识别的起止时间（已支持【HH:MM:SS-HH:MM:SS】、毫秒、"
-                        "从/至/到、纯秒区间带「秒」字等）。请对照上方终端预览与日志文件；"
-                        "把「嵌套字段节选」或合并字符串里含时间的片段发开发者即可扩展正则。"
-                    )
-                merged_in = _merge_ranges(ranges)
-                dur = _ffprobe_duration(current)
-                try:
-                    pad = float(
-                        os.environ.get("BILIBILI_REVIEW_RECUT_PAD_SEC", "1.0").strip()
-                        or "0"
-                    )
-                except ValueError:
-                    pad = 1.0
-                ranges_for_cut = _expand_remove_ranges_with_padding(
-                    merged_in,
-                    pad_sec=pad,
-                    duration_sec=dur,
-                )
-                parts = [
-                    f"{_format_seconds_as_hms(a)}–{_format_seconds_as_hms(b)}"
-                    for a, b in merged_in
-                ]
-                print(
-                    f"  从退回说明解析到 {len(merged_in)} 段需删除区间（合并后）: "
-                    + "；".join(parts)
-                )
-                if len(merged_in) != len(ranges):
-                    print(
-                        f"  （原始解析 {len(ranges)} 段，重叠/相邻合并为 {len(merged_in)} 段）"
-                    )
-                if pad > 0 and ranges_for_cut:
-                    parts_cut = [
-                        f"{_format_seconds_as_hms(a)}–{_format_seconds_as_hms(b)}"
-                        for a, b in ranges_for_cut
-                    ]
-                    print(
-                        f"  每段左右各扩展 {pad:g}s 后实际剪除（共 {len(ranges_for_cut)} 段）: "
-                        + "；".join(parts_cut)
-                    )
-                elif pad <= 0:
-                    print("  （BILIBILI_REVIEW_RECUT_PAD_SEC=0，未做左右扩展）")
-                out = current.with_name(current.stem + "_recut.mp4")
-                ffmpeg_remove_time_ranges(current, out, ranges_for_cut)
-                print(f"  已剪除指定片段，输出: {out}")
-                if current.resolve() != original_bilingual.resolve():
-                    try:
-                        current.unlink()
-                        print(f"  已删除上一轮中间文件: {current.name}")
-                    except OSError as e:
-                        print(f"  警告: 删除中间文件失败（可手动删）: {current} — {e}")
-                print("  正在替换稿件视频并重新提交…")
-                await _replace_video_edit(bvid, out, credential)
-                current = out
                 print("  已提交修改，继续轮询审核…")
                 break
 
@@ -1009,6 +1050,66 @@ async def poll_and_repair_rejected(
             raise TimeoutError(
                 f"{max_wait} 秒内本轮未等到审核通过或退回，请稍后在创作中心查看。"
             )
+
+
+async def run_auto_repair_flow(bvid: str, bilingual_mp4: Path) -> None:
+    """
+    先查询退回原因 → 若已退回则剪片并替换上传 → 继续轮询（再退再处理）。
+    若当前为审核中，则进入轮询直至退回或通过。
+    """
+    from upload_bilibili import _load_local_env
+
+    _load_local_env()
+    credential = _credential()
+    ok = await credential.check_valid()
+    if not ok:
+        raise RuntimeError("Cookie 无效或已过期，请重新导出 bilibili_cookie.env")
+
+    original_bilingual = Path(bilingual_mp4).resolve()
+    current = original_bilingual
+
+    print(f"步骤 1/3：查询稿件 {bvid} 审核状态与退回说明…")
+    archive_json, page_state = await _fetch_review_data(bvid, credential)
+    status = classify_review(archive_json, page_state)
+    api_fp = _write_review_api_json(bvid, archive_json, page_state)
+    print(f"  接口快照已写入: {api_fp}")
+    _maybe_print_full_review_json(api_fp)
+
+    if status == "passed":
+        print("\n当前状态：审核已通过，无需剪片或替换。")
+        arc = archive_json.get("archive")
+        if isinstance(arc, dict) and arc.get("state") is not None:
+            print(f"  archive.state = {arc.get('state')!r}")
+        return
+
+    if status == "pending":
+        print(
+            "\n当前状态：审核中 / 待判定。"
+            "将进入轮询；一旦退回将自动解析说明、剪片并替换上传。"
+        )
+        await poll_and_repair_rejected(bvid, original_bilingual)
+        return
+
+    print("\n当前状态：已退回。以下为退回说明：\n")
+    print_bilibili_review_content(archive_json, page_state)
+
+    print("\n步骤 2/3：按退回说明剪片…")
+    print("步骤 3/3：上传并替换该 BV 的分 P…")
+    current = await _repair_rejected_clip_and_replace(
+        bvid,
+        current,
+        original_bilingual,
+        archive_json,
+        page_state,
+        credential,
+        step_label="[步骤 2-3]",
+    )
+    print("\n继续轮询审核（若再次退回将自动剪片并替换，通过则结束）…")
+    await poll_and_repair_rejected(bvid, current)
+
+
+def run_auto_repair_sync(bvid: str, bilingual_mp4: str | Path) -> None:
+    asyncio.run(run_auto_repair_flow(bvid, Path(bilingual_mp4).resolve()))
 
 
 def run_review_flow_sync(bvid: str, bilingual_mp4: str | Path) -> None:
@@ -1126,43 +1227,9 @@ async def _recut_rejected_video_only_async(bvid: str, mp4: Path) -> Path:
 
     print("当前状态：已退回。以下按退回说明裁剪本地视频（不上传）。")
     print_bilibili_review_content(archive_json, page_state)
-    print("  哔哩哔哩审核：已退回，解析需删除的时间段…")
-    ranges, range_source = extract_time_ranges_for_review(archive_json, page_state)
-    if range_source != "无":
-        print(f"  区间解析来源: {range_source}")
-    blob = _review_text_blob(archive_json, page_state)
-    if not ranges:
-        _print_reject_response_preview(bvid, archive_json, page_state, blob)
-        fp = _write_reject_debug_text(bvid, blob)
-        print(f"  未解析到时间段，完整接口原文已写入: {fp}")
-        raise RuntimeError("退回说明中未解析到可自动剪片的时间段，无法执行 --recut-only。")
-
-    merged_in = _merge_ranges(ranges)
-    dur = _ffprobe_duration(current)
-    try:
-        pad = float(os.environ.get("BILIBILI_REVIEW_RECUT_PAD_SEC", "1.0").strip() or "0")
-    except ValueError:
-        pad = 1.0
-    ranges_for_cut = _expand_remove_ranges_with_padding(
-        merged_in,
-        pad_sec=pad,
-        duration_sec=dur,
+    ranges_for_cut = _diagnose_reject_and_parse_ranges(
+        bvid, archive_json, page_state, current
     )
-    parts = [f"{_format_seconds_as_hms(a)}–{_format_seconds_as_hms(b)}" for a, b in merged_in]
-    print(f"  从退回说明解析到 {len(merged_in)} 段需删除区间（合并后）: " + "；".join(parts))
-    if len(merged_in) != len(ranges):
-        print(f"  （原始解析 {len(ranges)} 段，重叠/相邻合并为 {len(merged_in)} 段）")
-    if pad > 0 and ranges_for_cut:
-        parts_cut = [
-            f"{_format_seconds_as_hms(a)}–{_format_seconds_as_hms(b)}"
-            for a, b in ranges_for_cut
-        ]
-        print(
-            f"  每段左右各扩展 {pad:g}s 后实际剪除（共 {len(ranges_for_cut)} 段）: "
-            + "；".join(parts_cut)
-        )
-    elif pad <= 0:
-        print("  （BILIBILI_REVIEW_RECUT_PAD_SEC=0，未做左右扩展）")
 
     out = current.with_name(current.stem + "_recut.mp4")
     ffmpeg_remove_time_ranges(current, out, ranges_for_cut)
@@ -1230,6 +1297,11 @@ def main() -> None:
         action="store_true",
         help="按当前退回说明裁剪你指定的本地视频，生成 *_recut.mp4；不上传",
     )
+    ap.add_argument(
+        "--auto-repair",
+        action="store_true",
+        help="先查退回原因 → 自动剪片 → 替换上传 → 继续轮询（推荐：一条命令完成退稿处理）",
+    )
     args = ap.parse_args()
     try:
         bvid = normalize_bvid_cli_arg(args.bvid)
@@ -1245,9 +1317,17 @@ def main() -> None:
         )
         sys.exit(2)
     if args.query_reject:
-        if args.replace_only or args.resume_review or args.recut_only or args.video or args.video_flag:
+        if (
+            args.replace_only
+            or args.resume_review
+            or args.recut_only
+            or args.auto_repair
+            or args.video
+            or args.video_flag
+        ):
             print(
-                "错误: --query-reject 只需 BV 号，请勿加视频路径或 --replace-only / --resume-review / --recut-only",
+                "错误: --query-reject 只需 BV 号，请勿加视频路径或 --replace-only / "
+                "--resume-review / --recut-only / --auto-repair",
                 file=sys.stderr,
             )
             sys.exit(2)
@@ -1274,9 +1354,9 @@ def main() -> None:
                 file=sys.stderr,
             )
             sys.exit(2)
-        if args.replace_only or args.resume_review:
+        if args.replace_only or args.resume_review or args.auto_repair:
             print(
-                "错误: --recut-only 不可与 --replace-only / --resume-review 同时使用。",
+                "错误: --recut-only 不可与 --replace-only / --resume-review / --auto-repair 同时使用。",
                 file=sys.stderr,
             )
             sys.exit(2)
@@ -1286,6 +1366,37 @@ def main() -> None:
             sys.exit(1)
         try:
             run_recut_rejected_video_only_sync(bvid, vp)
+        except (RuntimeError, TimeoutError, FileNotFoundError) as e:
+            print(f"错误: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if args.auto_repair:
+        if args.replace_only or args.resume_review or args.recut_only:
+            print(
+                "错误: --auto-repair 不可与 --replace-only / --resume-review / --recut-only 同时使用。",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if args.video_flag:
+            vp = Path(args.video_flag).resolve()
+        elif args.video:
+            vp = Path(args.video).resolve()
+        else:
+            fp = _default_bilingual_mp4()
+            if not fp:
+                print(
+                    f"错误: --auto-repair 须指定视频路径，或未在 {VIDEO_SUBS_DIR} 找到 *_bilingual.mp4",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            vp = fp
+            print(f"使用本地视频: {vp}")
+        if not vp.is_file():
+            print(f"错误: 找不到文件: {vp}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            run_auto_repair_sync(bvid, vp)
         except (RuntimeError, TimeoutError, FileNotFoundError) as e:
             print(f"错误: {e}", file=sys.stderr)
             sys.exit(1)

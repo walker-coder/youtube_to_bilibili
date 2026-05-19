@@ -17,7 +17,7 @@
 - 转载投稿须自行确保有权使用素材，并遵守哔哩哔哩社区规范。
 - YouTube 登录态：不要用 bilibili_cookie.env（那是 B 站 KEY=value）。将浏览器导出的 Netscape 文件放在项目根目录，命名为 youtube_cookies.txt 或扩展默认名 www.youtube.com_cookies（.txt 可无），或传 --cookies / 环境变量 YOUTUBE_COOKIES_FILE。
 - 若下载仍慢：先 yt-dlp -U；再配合 cookies 常能缓解限速。
-- B 站投稿标题：默认会先去掉 YouTube 原标题末尾「| The China Show M/D/YYYY」（及可选尾随 |），再格式化为「清理后标题或 --title | YYYY/MM/DD」（YouTube upload_date）；无上传日期元数据时仅用标题。
+- B 站投稿标题：默认会先去掉 YouTube 原标题末尾「| The China Show M/D/YYYY」（及可选尾随 |），将独立单词 Xi 替换为 China，再格式化为「清理后标题或 --title | YYYY/MM/DD」（YouTube upload_date）；无上传日期元数据时仅用标题。
 - 上传成功后会轮询创作中心审核：若「已退回」且稿件问题中含【HH:MM:SS-HH:MM:SS】，则剪除对应片段并替换稿件后结束（不再轮询）。可用 --no-review-wait 关闭。环境变量见 bilibili_review.py。
 - 仅当**已上传且 B 站审核通过**后，流水线最后一步才会清理 **video_subs/** 下当前视频在本次流程产生的文件（下载的 mp4、vtt、srt、双语成片、recut 等）；其它视频 ID 的文件不受影响。若中途报错、审核失败、使用 `--no-upload` 或 `--no-review-wait`，则不会自动删除文件。
 - 若链接含 &list=（播放列表），脚本已默认 noplaylist，只处理当前 watch?v= 视频；也可手动改成仅 https://www.youtube.com/watch?v=视频ID 。
@@ -309,6 +309,14 @@ def _strip_china_show_title_suffix(title: str) -> str:
     return stripped if stripped else raw
 
 
+_RE_TITLE_XI_WORD = re.compile(r"\bXi\b", re.IGNORECASE)
+
+
+def _replace_title_xi_with_china(title: str) -> str:
+    """B 站投稿标题：将独立单词 Xi 替换为 China（避免误改 Exists 等子串）。"""
+    return _RE_TITLE_XI_WORD.sub("China", title)
+
+
 def _youtube_upload_date_ymd_slash(info: dict) -> str | None:
     """从 yt-dlp 信息解析上传日期，格式 YYYY/MM/DD（用于 B 站标题后缀）。"""
     ud = (info.get("upload_date") or info.get("release_date") or "").strip()
@@ -595,7 +603,7 @@ def run_pipeline(
         title = f"{base_title} | {yt_date_ymd}"
     else:
         title = base_title
-    title = title[:80]
+    title = _replace_title_xi_with_china(title)[:80]
     desc = (
         f"转载自 YouTube"
         "仅供个人学习交流，如有侵权请联系删除。"
