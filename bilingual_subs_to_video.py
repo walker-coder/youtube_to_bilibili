@@ -160,6 +160,42 @@ def _srt_cue_to_single_ass_line(s: str, *, cjk: bool) -> str:
     return _ass_escape(merged)
 
 
+_FONT_SIZE_EN = 84  # 原 56，提高 0.5 倍（×1.5）
+
+
+def _merge_en_only_to_ass(en_cues: list[dict]) -> str:
+    """生成 ASS：底部水平居中，单行英文；黄底黑字（BorderStyle 3 不透明框）。"""
+    font = _ass_fontname()
+    line_tag = rf"{{\an2\pos(960,1040)\fs{_FONT_SIZE_EN}\c&H000000&}}"
+    margin_lr = 24
+
+    lines = [
+        "[Script Info]",
+        "Title: en_only",
+        "ScriptType: v4.00+",
+        "PlayResX: 1920",
+        "PlayResY: 1080",
+        "WrapStyle: 0",
+        "ScaledBorderAndShadow: yes",
+        "YCbCr Matrix: TV.709",
+        "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+        f"Style: Default,{font},{_FONT_SIZE_EN},&H00000000,&H00000000,&H0000FFFF,&H0000FFFF,-1,0,0,0,100,100,0,0,3,8,0,2,{margin_lr},{margin_lr},100,1",
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ]
+
+    for cue in en_cues:
+        start = _sec_to_ass_time(cue["start"])
+        end = _sec_to_ass_time(cue["end"])
+        en_ass = _srt_cue_to_single_ass_line(cue["text"], cjk=False)
+        lines.append(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{line_tag}{en_ass}")
+
+    return "\n".join(lines) + "\n"
+
+
 def _merge_to_ass(en_cues: list[dict], zh_cues: list[dict]) -> str:
     """生成 ASS：底部水平居中，上行中文一行、下行英文一行；黄底黑字（BorderStyle 3 不透明框）。"""
     font = _ass_fontname()
@@ -199,7 +235,7 @@ def _merge_to_ass(en_cues: list[dict], zh_cues: list[dict]) -> str:
         end = _sec_to_ass_time(en_cues[i]["end"])
         en_ass = _srt_cue_to_single_ass_line(en, cjk=False)
         zh_ass = _srt_cue_to_single_ass_line(zh, cjk=True)
-        body = zh_ass + r"\N{\fs56\c&H000000&}" + en_ass
+        body = zh_ass + rf"\N{{\fs{_FONT_SIZE_EN}\c&H000000&}}" + en_ass
         lines.append(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{line_tag}{body}")
 
     return "\n".join(lines) + "\n"
@@ -416,6 +452,11 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="中英 SRT 合并为 ASS 并烧录到视频")
     ap.add_argument("--en", type=Path, default=VIDEO_SUBS_DIR / "1.srt", help="英文字幕")
     ap.add_argument("--zh", type=Path, default=VIDEO_SUBS_DIR / "1.zh-Hans.srt", help="简体中文字幕")
+    ap.add_argument(
+        "--en-only",
+        action="store_true",
+        help="仅烧录单行英文字幕（不需 --zh）",
+    )
     ap.add_argument("--video", type=Path, default=None, help="输入视频（默认 video_subs/输出.mp4 或 1.mp4）")
     ap.add_argument("-o", "--output", type=Path, default=None, help="输出视频")
     ap.add_argument("--ass-only", type=Path, default=None, help="只生成 ASS 到该路径，不跑 ffmpeg")
@@ -437,22 +478,33 @@ def main() -> None:
     args = ap.parse_args()
 
     en_path = args.en.resolve()
-    zh_path = args.zh.resolve()
-    if not en_path.is_file() or not zh_path.is_file():
-        print(f"找不到字幕: {en_path} 或 {zh_path}")
+    if not en_path.is_file():
+        print(f"找不到字幕: {en_path}")
         sys.exit(1)
 
     en_cues = _parse_srt(en_path)
-    zh_cues = _parse_srt(zh_path)
-    if not en_cues or not zh_cues:
+    if not en_cues:
         print("字幕解析为空")
         sys.exit(1)
 
-    if args.export_pngs:
-        _export_pngs(en_cues, zh_cues, args.export_pngs.resolve())
-        return
-
-    ass_content = _merge_to_ass(en_cues, zh_cues)
+    if args.en_only:
+        if args.export_pngs:
+            print("--export-pngs 与 --en-only 不兼容")
+            sys.exit(1)
+        ass_content = _merge_en_only_to_ass(en_cues)
+    else:
+        zh_path = args.zh.resolve()
+        if not zh_path.is_file():
+            print(f"找不到字幕: {zh_path}")
+            sys.exit(1)
+        zh_cues = _parse_srt(zh_path)
+        if not zh_cues:
+            print("字幕解析为空")
+            sys.exit(1)
+        if args.export_pngs:
+            _export_pngs(en_cues, zh_cues, args.export_pngs.resolve())
+            return
+        ass_content = _merge_to_ass(en_cues, zh_cues)
 
     if args.ass_only:
         ass_path = Path(args.ass_only).resolve()

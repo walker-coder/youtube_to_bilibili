@@ -565,14 +565,11 @@ def run_pipeline(
         cmd = [
             sys.executable,
             str(PROJECT_ROOT / "bilingual_subs_to_video.py"),
+            "--en-only",
             "--video",
             str(video_path),
             "--en",
             str(en_srt),
-            # "--zh",
-            # str(zh_srt),
-            "--zh",
-            str(en_srt),  # 中文烧录已禁用，用英文字幕占位以满足 bilingual_subs_to_video 参数
             "-o",
             str(out_bilingual),
         ]
