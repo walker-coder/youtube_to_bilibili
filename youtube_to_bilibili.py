@@ -42,10 +42,10 @@ import yt_dlp
 from yt_dlp.utils import DownloadError
 
 from paths_config import PROJECT_ROOT, VIDEO_SUBS_DIR, ensure_video_subs_dir
-from translate_subs_to_zh_hans import translate_vtt_to_zh_hans
+# from translate_subs_to_zh_hans import translate_vtt_to_zh_hans
 from upload_bilibili import upload_video_to_bilibili
-from vtt_to_srt import vtt_to_srt
-from zh_sensitive_replace import apply_zh_sensitive_replacements_to_vtt
+from vtt_to_srt import maybe_lowercase_en_vtt_if_mostly_upper, vtt_to_srt
+# from zh_sensitive_replace import apply_zh_sensitive_replacements_to_vtt
 
 # 仅 1080p：DASH 合并（最佳 1080p 视频轨 + 最佳音频）或极少数单文件 1080p；无匹配则 yt-dlp 失败。
 YOUTUBE_FORMAT_1080P_ONLY = "bestvideo[height=1080]+bestaudio/best[height=1080]"
@@ -141,14 +141,14 @@ def _resolve_downloaded_video(info: dict, video_id: str) -> Path:
     raise FileNotFoundError(f"未找到已下载视频文件（预期 yt_{video_id}.mp4 等）")
 
 
-def _zh_hans_vtt_path_from_en_vtt(en_vtt: Path) -> Path:
-    """与 translate_subs_to_zh_hans.translate_vtt_to_zh_hans 输出路径一致。"""
-    stem = en_vtt.stem
-    if stem.endswith(".en"):
-        base = en_vtt.parent / stem[:-3]
-    else:
-        base = en_vtt.parent / stem
-    return base.parent / (base.name + ".zh-Hans.vtt")
+# def _zh_hans_vtt_path_from_en_vtt(en_vtt: Path) -> Path:
+#     """与 translate_subs_to_zh_hans.translate_vtt_to_zh_hans 输出路径一致。"""
+#     stem = en_vtt.stem
+#     if stem.endswith(".en"):
+#         base = en_vtt.parent / stem[:-3]
+#     else:
+#         base = en_vtt.parent / stem
+#     return base.parent / (base.name + ".zh-Hans.vtt")
 
 
 def _find_local_video_for_id(video_id: str) -> Path:
@@ -499,7 +499,7 @@ def run_pipeline(
     yt_date_ymd: str | None
     video_path: Path | None = None
     en_vtt: Path | None = None
-    zh_vtt: Path | None = None
+    # zh_vtt: Path | None = None
     out_bilingual: Path | None = None
 
     if from_step <= 1:
@@ -539,27 +539,28 @@ def run_pipeline(
                 raise FileNotFoundError(
                     f"未找到 {out_bilingual}，无法从步骤 4 继续。请先完成步骤 3。"
                 )
-        elif from_step == 3:
-            assert en_vtt is not None
-            zh_vtt = _zh_hans_vtt_path_from_en_vtt(en_vtt)
-            if not zh_vtt.is_file():
-                raise FileNotFoundError(
-                    f"未找到简体字幕 {zh_vtt}。请先完成步骤 2，或确认文件名与 translate_subs_to_zh_hans 输出一致。"
-                )
+        # elif from_step == 3:
+        #     assert en_vtt is not None
+        #     zh_vtt = _zh_hans_vtt_path_from_en_vtt(en_vtt)
+        #     if not zh_vtt.is_file():
+        #         raise FileNotFoundError(
+        #             f"未找到简体字幕 {zh_vtt}。请先完成步骤 2，或确认文件名与 translate_subs_to_zh_hans 输出一致。"
+        #         )
 
-    if from_step <= 2:
-        assert en_vtt is not None
-        print(f"步骤 2/{total_steps}：翻译为简体中文（可能较久）…")
-        zh_vtt = translate_vtt_to_zh_hans(en_vtt)
+    # if from_step <= 2:
+    #     assert en_vtt is not None
+    #     print(f"步骤 2/{total_steps}：翻译为简体中文（可能较久）…")
+    #     zh_vtt = translate_vtt_to_zh_hans(en_vtt)
 
-    if zh_vtt is not None and from_step <= 3:
-        zh_vtt = apply_zh_sensitive_replacements_to_vtt(zh_vtt)
+    # if zh_vtt is not None and from_step <= 3:
+    #     zh_vtt = apply_zh_sensitive_replacements_to_vtt(zh_vtt)
 
     if from_step <= 3:
-        assert video_path is not None and en_vtt is not None and zh_vtt is not None
-        print(f"步骤 3/{total_steps}：转为 SRT 并烧录双语画面字幕…")
+        assert video_path is not None and en_vtt is not None
+        print(f"步骤 3/{total_steps}：转为 SRT 并烧录画面字幕（仅英文，中文已禁用）…")
+        maybe_lowercase_en_vtt_if_mostly_upper(en_vtt)
         en_srt = vtt_to_srt(en_vtt)
-        zh_srt = vtt_to_srt(zh_vtt)
+        # zh_srt = vtt_to_srt(zh_vtt)
         out_bilingual = VIDEO_SUBS_DIR / f"yt_{vid}_bilingual.mp4"
         cmd = [
             sys.executable,
@@ -568,8 +569,10 @@ def run_pipeline(
             str(video_path),
             "--en",
             str(en_srt),
+            # "--zh",
+            # str(zh_srt),
             "--zh",
-            str(zh_srt),
+            str(en_srt),  # 中文烧录已禁用，用英文字幕占位以满足 bilingual_subs_to_video 参数
             "-o",
             str(out_bilingual),
         ]
@@ -612,7 +615,8 @@ def run_pipeline(
         out_bilingual,
         title=title,
         desc=desc,
-        tags=["YouTube", "中英字幕", "转载", "Bloomberg", "The China Show"],
+        tags=["YouTube", "英文字幕", "转载", "Bloomberg", "The China Show"],
+        # tags=["YouTube", "中英字幕", "转载", "Bloomberg", "The China Show"],
         source=f"YouTube: {url[:180]}",
     )
     print("投稿成功:", result)
