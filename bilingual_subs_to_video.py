@@ -161,12 +161,18 @@ def _srt_cue_to_single_ass_line(s: str, *, cjk: bool) -> str:
 
 
 _FONT_SIZE_EN = 84  # 原 56，提高 0.5 倍（×1.5）
+# 黄底字幕框锚点（1080p，\\an2 底边中点）；Y 越小越靠上，画面下缘为 1080
+_SUBTITLE_POS_X = 960
+_SUBTITLE_POS_Y = 1000  # 原 1040，略上移黄框
 
 
 def _merge_en_only_to_ass(en_cues: list[dict]) -> str:
     """生成 ASS：底部水平居中，单行英文；黄底黑字（BorderStyle 3 不透明框）。"""
     font = _ass_fontname()
-    line_tag = rf"{{\an2\pos(960,1040)\fs{_FONT_SIZE_EN}\c&H000000&}}"
+    line_tag = (
+        rf"{{\an2\pos({_SUBTITLE_POS_X},{_SUBTITLE_POS_Y})"
+        rf"\fs{_FONT_SIZE_EN}\c&H000000&}}"
+    )
     margin_lr = 24
 
     lines = [
@@ -206,7 +212,9 @@ def _merge_to_ass(en_cues: list[dict], zh_cues: list[dict]) -> str:
     # \\an2 底中；\\pos 的 Y 为底边锚点，数值越大越贴近画面下缘（1080p 下缘为 1080）。
     # BorderStyle=3 时 OutlineColour 勿用纯黑，Outline 与字号成比例以免黑边盖黄底。
     # MarginL/MarginR 较小以便字幕向左右多占宽度（相对原先 80）。
-    line_tag = r"{\an2\pos(960,1040)\fs64\c&H000000&}"
+    line_tag = (
+        rf"{{\an2\pos({_SUBTITLE_POS_X},{_SUBTITLE_POS_Y})\fs64\c&H000000&}}"
+    )
     margin_lr = 24
 
     lines = [
