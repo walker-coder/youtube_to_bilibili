@@ -163,7 +163,7 @@ def _srt_cue_to_single_ass_line(s: str, *, cjk: bool) -> str:
 _FONT_SIZE_EN = 84  # 原 56，提高 0.5 倍（×1.5）
 # 黄底字幕框锚点（1080p，\\an2 底边中点）；Y 越小越靠上，画面下缘为 1080
 _SUBTITLE_POS_X = 960
-_SUBTITLE_POS_Y = 1000  # 原 1040，略上移黄框
+_SUBTITLE_POS_Y = 1020
 
 
 def _merge_en_only_to_ass(en_cues: list[dict]) -> str:
