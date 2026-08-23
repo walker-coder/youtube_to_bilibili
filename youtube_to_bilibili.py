@@ -270,6 +270,14 @@ def _is_unavailable_format_error(e: BaseException) -> bool:
     )
 
 
+def _is_subtitle_download_error(e: BaseException) -> bool:
+    msg = str(e).lower()
+    return (
+        "unable to download video subtitles" in msg
+        or "did not get any data blocks" in msg
+    )
+
+
 def _is_retriable_youtube_download_error(e: BaseException) -> bool:
     """可换 player_client / 去掉 cookies 后重试的错误。"""
     msg = str(e).lower()
@@ -386,16 +394,13 @@ def download_youtube(
     ensure_video_subs_dir()
     cookie_path = None if no_youtube_cookies else _resolve_youtube_cookiefile(cookies_file)
 
-    base_opts: dict = {
-        # 链接里常带 &list=...，只下载当前视频，不展开整个播放列表
+    shared_opts: dict = {
         "noplaylist": True,
         "format": YOUTUBE_FORMAT_1080P_ONLY,
         "merge_output_format": "mp4",
         "outtmpl": str(VIDEO_SUBS_DIR / "yt_%(id)s.%(ext)s"),
         "quiet": False,
         "no_warnings": False,
-        "writesubtitles": True,
-        "writeautomaticsub": True,
         "subtitleslangs": ["en"],
         "subtitlesformat": "vtt",
         "embed_subs": False,
@@ -403,30 +408,42 @@ def download_youtube(
         **_ytdlp_ejs_opts(),
     }
     if (os.environ.get("YTDLP_FORCE_IPV4", "1").strip().lower() not in ("0", "false", "no")):
-        base_opts["force_ipv4"] = True
+        shared_opts["force_ipv4"] = True
     js_rt = _js_runtimes_from_env()
     if js_rt:
-        base_opts["js_runtimes"] = js_rt
+        shared_opts["js_runtimes"] = js_rt
         print(f"  使用 JS 运行环境: {list(js_rt.keys())}（来自环境变量 YTDLP_DENO_PATH / YTDLP_NODE_PATH）")
 
     client_chains: list[tuple[str, list[str], bool]] = []
     env_clients = _youtube_player_clients()
-    # 匿名优先：cookies + tv 常触发 tv_downgraded → "page needs to be reloaded"
-    client_chains.append(("匿名", env_clients or ["tv", "web_safari", "android_vr"], False))
     if cookie_path:
         cookie_clients = ["web_safari", "web_embedded", "-tv_downgraded"]
         client_chains.append(("cookies（禁用 tv_downgraded）", cookie_clients, True))
         if env_clients:
             client_chains.append(("cookies", env_clients, True))
+    client_chains.append(("匿名", env_clients or ["tv", "web_safari", "android_vr"], False))
     client_chains.append(("匿名 android_vr", ["android_vr"], False))
 
-    def _extract(with_cookie: bool, clients: list[str], label: str):
-        opts = {**base_opts}
+    def _extract(
+        with_cookie: bool,
+        clients: list[str],
+        label: str,
+        *,
+        video_only: bool = False,
+        subs_only: bool = False,
+    ):
+        opts = {
+            **shared_opts,
+            "writesubtitles": not video_only,
+            "writeautomaticsub": not video_only,
+            "skip_download": subs_only,
+        }
         ex_args = _youtube_extractor_args(player_clients=clients)
         if ex_args:
             opts["extractor_args"] = ex_args
             pc = ex_args.get("youtube", {}).get("player_client", [])
-            print(f"  YouTube player_client ({label}): {pc}")
+            phase = "字幕" if subs_only else "视频"
+            print(f"  YouTube player_client ({label}, {phase}): {pc}")
         if with_cookie and cookie_path:
             p = Path(cookie_path).expanduser().resolve()
             if not p.is_file():
@@ -438,17 +455,19 @@ def download_youtube(
 
     info = None
     last_err: BaseException | None = None
+    winning_chain: tuple[str, list[str], bool] | None = None
     for chain_label, clients, use_cookie in client_chains:
         if use_cookie and not cookie_path:
             continue
         try:
-            info = _extract(use_cookie, clients, chain_label)
+            info = _extract(use_cookie, clients, chain_label, video_only=True)
+            winning_chain = (chain_label, clients, use_cookie)
             break
         except DownloadError as e:
             last_err = e
             if not _is_retriable_youtube_download_error(e):
                 raise
-            print(f"  提示：{chain_label} 下载失败（{e}），尝试下一策略…")
+            print(f"  提示：{chain_label} 视频下载失败（{e}），尝试下一策略…")
 
     if not info:
         if last_err and _is_unavailable_format_error(last_err):
@@ -463,6 +482,41 @@ def download_youtube(
     title = (info.get("title") or "video").strip()
     date_ymd = _youtube_upload_date_ymd_slash(info)
     video_path = _resolve_downloaded_video(info, vid)
+
+    for p in VIDEO_SUBS_DIR.glob(f"yt_{vid}*.vtt"):
+        try:
+            if p.stat().st_size == 0:
+                p.unlink()
+        except OSError:
+            pass
+
+    subtitle_chains: list[tuple[str, list[str], bool]] = []
+    if winning_chain:
+        subtitle_chains.append(winning_chain)
+    for chain in client_chains:
+        if chain not in subtitle_chains:
+            subtitle_chains.append(chain)
+
+    subtitle_ok = False
+    for chain_label, clients, use_cookie in subtitle_chains:
+        if use_cookie and not cookie_path:
+            continue
+        try:
+            _extract(use_cookie, clients, chain_label, subs_only=True)
+            subtitle_ok = True
+            break
+        except DownloadError as e:
+            if _is_subtitle_download_error(e) or _is_retriable_youtube_download_error(e):
+                print(f"  提示：{chain_label} 字幕下载失败（{e}），尝试下一策略…")
+                continue
+            raise
+
+    if not subtitle_ok:
+        raise RuntimeError(
+            f"视频已下载（{video_path.name}），但英文字幕下载失败。"
+            "可检查网络后重试，或删除该视频文件后重新运行流水线。"
+        )
+
     en_vtt = _find_en_vtt(vid)
     return video_path, en_vtt, vid, title, date_ymd
 
