@@ -456,7 +456,8 @@ def download_youtube(
             opts["retries"] = max(int(opts.get("retries") or 20), 30)
             opts["socket_timeout"] = max(float(opts.get("socket_timeout") or 90), 120)
             opts["sleep_interval"] = 1
-            opts["subtitleslangs"] = ["en", "en-orig", "en-US"]
+            # 只下 en；不要加 en-orig（常 502 且流水线用不到）
+            opts["subtitleslangs"] = ["en"]
         ex_args = _youtube_extractor_args(player_clients=clients)
         if ex_args:
             opts["extractor_args"] = ex_args
