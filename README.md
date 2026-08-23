@@ -8,7 +8,7 @@
 - [ffmpeg](https://ffmpeg.org/) 已加入系统 `PATH`
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp)（随 `requirements.txt` 安装）
 
-可选：若使用 YouTube 登录 cookies 下载时仍提示需 JS 验证，请安装 [Deno](https://deno.land/) 或 Node，或设置环境变量 `YTDLP_DENO_PATH` / `YTDLP_NODE_PATH` 指向可执行文件（见 [yt-dlp EJS 说明](https://github.com/yt-dlp/yt-dlp/wiki/EJS)）。
+可选：若使用 YouTube 登录 cookies 下载时仍提示需 JS 验证，请安装 [Deno](https://deno.land/) 或 Node，并执行 `pip install -U "yt-dlp[default]"`（含 **yt-dlp-ejs** JS challenge 求解器）。或设置环境变量 `YTDLP_DENO_PATH` / `YTDLP_NODE_PATH` 指向可执行文件（见 [yt-dlp EJS 说明](https://github.com/yt-dlp/yt-dlp/wiki/EJS)）。脚本默认 `YTDLP_REMOTE_COMPONENTS=ejs:github` 作为兜底。
 
 云服务器若 **IPv6 不通**（`curl -6` 失败），下载默认启用 **仅 IPv4**（等同 `yt-dlp --force-ipv4`，环境变量 `YTDLP_FORCE_IPV4` 默认为 `1`）。若必须走 IPv6，设置 `YTDLP_FORCE_IPV4=0`。
 

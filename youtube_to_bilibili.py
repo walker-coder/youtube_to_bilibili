@@ -21,7 +21,7 @@
 - 上传成功后会轮询创作中心审核：若「已退回」且稿件问题中含【HH:MM:SS-HH:MM:SS】，则剪除对应片段并替换稿件后结束（不再轮询）。可用 --no-review-wait 关闭。环境变量见 bilibili_review.py。
 - 仅当**已上传且 B 站审核通过**后，流水线最后一步才会清理 **video_subs/** 下当前视频在本次流程产生的文件（下载的 mp4、vtt、srt、双语成片、recut 等）；其它视频 ID 的文件不受影响。若中途报错、审核失败、使用 `--no-upload` 或 `--no-review-wait`，则不会自动删除文件。
 - 若链接含 &list=（播放列表），脚本已默认 noplaylist，只处理当前 watch?v= 视频；也可手动改成仅 https://www.youtube.com/watch?v=视频ID 。
-- 若使用 cookies 后出现「Requested format is not available」：cookie 已生效，但带登录态时需通过 YouTube 验证，本机须安装 Deno/Node 等（见 https://github.com/yt-dlp/yt-dlp/wiki/EJS ）。脚本会先带 cookie 下载，失败则自动去掉 cookie 重试。可选环境变量：YTDLP_DENO_PATH / YTDLP_NODE_PATH 指向 deno.exe、node.exe（未加入 PATH 时）。
+- 若使用 cookies 后出现「Requested format is not available」：cookie 已生效，但带登录态时需通过 YouTube 验证，本机须安装 Deno/Node 等（见 https://github.com/yt-dlp/yt-dlp/wiki/EJS ），并安装 `yt-dlp[default]`（含 yt-dlp-ejs）。脚本默认启用 `remote_components=ejs:github` 作为兜底。可选环境变量：YTDLP_DENO_PATH / YTDLP_NODE_PATH 指向 deno.exe、node.exe（未加入 PATH 时）。
 - 云服务器常见 IPv6 不通导致连接失败：默认启用 yt-dlp 的 force_ipv4（等同 --force-ipv4）。若需走 IPv6，设置环境变量 YTDLP_FORCE_IPV4=0。
 - 机房 IP / 新版 YouTube：默认 `player_client=tv,web_safari,android_vr`（按序回退；`android_vr` 在部分环境需 GVS PO Token）。可用 `YTDLP_YOUTUBE_PLAYER_CLIENT` 覆盖（如 `tv`）；设为 `none` 则不用。仍 403 时请在服务器放置 **youtube_cookies.txt**（浏览器导出 Netscape）。
 - 下载超时：默认 `socket_timeout=90`（yt-dlp 原默认 20）。可用 `YTDLP_SOCKET_TIMEOUT`、`YTDLP_RETRIES`、`YTDLP_FRAGMENT_RETRIES`、`YTDLP_CONCURRENT_FRAGMENTS` 覆盖。
@@ -123,6 +123,17 @@ def _ytdlp_network_opts() -> dict:
         "file_access_retries": 8,
         "concurrent_fragment_downloads": max(1, concurrent),
     }
+
+
+def _ytdlp_ejs_opts() -> dict:
+    """YouTube JS challenge 需 yt-dlp-ejs 或允许拉取远程组件；默认可从 GitHub 获取。"""
+    raw = (os.environ.get("YTDLP_REMOTE_COMPONENTS") or "ejs:github").strip()
+    if raw.lower() in ("none", "off", "0", "false", "no"):
+        return {}
+    components = [x.strip() for x in raw.replace(";", ",").split(",") if x.strip()]
+    if not components:
+        return {}
+    return {"remote_components": set(components)}
 
 
 def _js_runtimes_from_env() -> dict | None:
@@ -389,6 +400,7 @@ def download_youtube(
         "subtitlesformat": "vtt",
         "embed_subs": False,
         **_ytdlp_network_opts(),
+        **_ytdlp_ejs_opts(),
     }
     if (os.environ.get("YTDLP_FORCE_IPV4", "1").strip().lower() not in ("0", "false", "no")):
         base_opts["force_ipv4"] = True
@@ -470,6 +482,7 @@ def _youtube_extract_info_no_download(
         "quiet": True,
         "no_warnings": True,
         **_ytdlp_network_opts(),
+        **_ytdlp_ejs_opts(),
     }
     if (os.environ.get("YTDLP_FORCE_IPV4", "1").strip().lower() not in ("0", "false", "no")):
         base_opts["force_ipv4"] = True
