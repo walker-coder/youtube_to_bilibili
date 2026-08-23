@@ -196,6 +196,16 @@ def _find_local_video_for_id(video_id: str) -> Path:
     )
 
 
+_RE_YOUTUBE_ID = re.compile(
+    r"(?:youtu\.be/|youtube\.com/(?:watch\?.*?v=|embed/|shorts/|live/))([A-Za-z0-9_-]{11})"
+)
+
+
+def _youtube_id_from_url(url: str) -> str | None:
+    m = _RE_YOUTUBE_ID.search(url)
+    return m.group(1) if m else None
+
+
 def _find_en_vtt(video_id: str) -> Path:
     cands = sorted(VIDEO_SUBS_DIR.glob(f"yt_{video_id}*.vtt"))
     for p in cands:
@@ -438,6 +448,15 @@ def download_youtube(
             "writeautomaticsub": not video_only,
             "skip_download": subs_only,
         }
+        if subs_only:
+            # 只拉字幕时不要要求 1080p；android_vr 常无可用视频流但仍能下字幕
+            opts["format"] = "best/worst"
+            opts["ignore_no_formats_error"] = True
+            opts["concurrent_fragment_downloads"] = 1
+            opts["retries"] = max(int(opts.get("retries") or 20), 30)
+            opts["socket_timeout"] = max(float(opts.get("socket_timeout") or 90), 120)
+            opts["sleep_interval"] = 1
+            opts["subtitleslangs"] = ["en", "en-orig", "en-US"]
         ex_args = _youtube_extractor_args(player_clients=clients)
         if ex_args:
             opts["extractor_args"] = ex_args
@@ -453,21 +472,55 @@ def download_youtube(
         with yt_dlp.YoutubeDL(opts) as ydl:
             return ydl.extract_info(url, download=True)
 
+    def _en_vtt_ready(video_id: str) -> Path | None:
+        try:
+            p = _find_en_vtt(video_id)
+        except FileNotFoundError:
+            return None
+        try:
+            if p.is_file() and p.stat().st_size > 64:
+                return p
+        except OSError:
+            return None
+        return None
+
     info = None
     last_err: BaseException | None = None
     winning_chain: tuple[str, list[str], bool] | None = None
-    for chain_label, clients, use_cookie in client_chains:
-        if use_cookie and not cookie_path:
-            continue
+    url_vid = _youtube_id_from_url(url)
+    existing_video: Path | None = None
+    if url_vid:
         try:
-            info = _extract(use_cookie, clients, chain_label, video_only=True)
-            winning_chain = (chain_label, clients, use_cookie)
-            break
-        except DownloadError as e:
-            last_err = e
-            if not _is_retriable_youtube_download_error(e):
-                raise
-            print(f"  提示：{chain_label} 视频下载失败（{e}），尝试下一策略…")
+            existing_video = _find_local_video_for_id(url_vid)
+            if existing_video.stat().st_size < 1024 * 1024:
+                existing_video = None
+        except FileNotFoundError:
+            existing_video = None
+
+    if existing_video:
+        print(f"  已发现本地视频，跳过重下: {existing_video}")
+        try:
+            info = _youtube_extract_info_no_download(
+                url,
+                cookies_file=cookies_file,
+                no_youtube_cookies=no_youtube_cookies,
+            )
+        except Exception as e:
+            print(f"  提示：拉取元数据失败（{e}），仍用本地文件继续字幕步骤。")
+            info = {"id": url_vid, "title": existing_video.stem, "filepath": str(existing_video)}
+    else:
+        for chain_label, clients, use_cookie in client_chains:
+            if use_cookie and not cookie_path:
+                continue
+            try:
+                info = _extract(use_cookie, clients, chain_label, video_only=True)
+                winning_chain = (chain_label, clients, use_cookie)
+                break
+            except DownloadError as e:
+                last_err = e
+                if not _is_retriable_youtube_download_error(e):
+                    raise
+                print(f"  提示：{chain_label} 视频下载失败（{e}），尝试下一策略…")
 
     if not info:
         if last_err and _is_unavailable_format_error(last_err):
@@ -475,13 +528,14 @@ def download_youtube(
         if last_err:
             raise last_err
         raise RuntimeError("yt-dlp 未返回视频信息")
-    vid = str(info.get("id") or "")
+    vid = str(info.get("id") or url_vid or "")
     if not vid:
         raise RuntimeError("无法解析视频 ID")
-    _log_youtube_download_quality(info)
+    if not existing_video:
+        _log_youtube_download_quality(info)
     title = (info.get("title") or "video").strip()
     date_ymd = _youtube_upload_date_ymd_slash(info)
-    video_path = _resolve_downloaded_video(info, vid)
+    video_path = existing_video or _resolve_downloaded_video(info, vid)
 
     for p in VIDEO_SUBS_DIR.glob(f"yt_{vid}*.vtt"):
         try:
@@ -490,7 +544,12 @@ def download_youtube(
         except OSError:
             pass
 
-    subtitle_chains: list[tuple[str, list[str], bool]] = []
+    # 字幕：优先 android_vr 匿名（此前已成功下过 142KiB 英文字幕，且不要求 1080p）
+    subtitle_chains: list[tuple[str, list[str], bool]] = [
+        ("匿名 android_vr", ["android_vr"], False),
+        ("匿名 web_embedded", ["web_embedded"], False),
+        ("cookies web_embedded", ["web_embedded", "-tv_downgraded"], True),
+    ]
     if winning_chain:
         subtitle_chains.append(winning_chain)
     for chain in client_chains:
@@ -503,8 +562,10 @@ def download_youtube(
             continue
         try:
             _extract(use_cookie, clients, chain_label, subs_only=True)
-            subtitle_ok = True
-            break
+            if _en_vtt_ready(vid):
+                subtitle_ok = True
+                break
+            print(f"  提示：{chain_label} 未写出有效英文字幕，尝试下一策略…")
         except DownloadError as e:
             if _is_subtitle_download_error(e) or _is_retriable_youtube_download_error(e):
                 print(f"  提示：{chain_label} 字幕下载失败（{e}），尝试下一策略…")
@@ -514,7 +575,7 @@ def download_youtube(
     if not subtitle_ok:
         raise RuntimeError(
             f"视频已下载（{video_path.name}），但英文字幕下载失败。"
-            "可检查网络后重试，或删除该视频文件后重新运行流水线。"
+            "可检查网络后重试（已有成片不会重下）。"
         )
 
     en_vtt = _find_en_vtt(vid)
