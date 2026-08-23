@@ -23,7 +23,7 @@
 - 若链接含 &list=（播放列表），脚本已默认 noplaylist，只处理当前 watch?v= 视频；也可手动改成仅 https://www.youtube.com/watch?v=视频ID 。
 - 若使用 cookies 后出现「Requested format is not available」：cookie 已生效，但带登录态时需通过 YouTube 验证，本机须安装 Deno/Node 等（见 https://github.com/yt-dlp/yt-dlp/wiki/EJS ）。脚本会先带 cookie 下载，失败则自动去掉 cookie 重试。可选环境变量：YTDLP_DENO_PATH / YTDLP_NODE_PATH 指向 deno.exe、node.exe（未加入 PATH 时）。
 - 云服务器常见 IPv6 不通导致连接失败：默认启用 yt-dlp 的 force_ipv4（等同 --force-ipv4）。若需走 IPv6，设置环境变量 YTDLP_FORCE_IPV4=0。
-- 机房 IP / 新版 YouTube：默认 `player_client=android_vr`（多数环境下不要求 GVS PO Token；旧版 `android` 常需 PO Token，见 yt-dlp PO-Token-Guide）。可用环境变量 `YTDLP_YOUTUBE_PLAYER_CLIENT` 覆盖（如 `android,web`）；设为 `none` 则不用。仍 403 时请在服务器放置 **youtube_cookies.txt**（浏览器导出 Netscape）。
+- 机房 IP / 新版 YouTube：默认 `player_client=tv,web_safari,android_vr`（按序回退；`android_vr` 在部分环境需 GVS PO Token）。可用 `YTDLP_YOUTUBE_PLAYER_CLIENT` 覆盖（如 `tv`）；设为 `none` 则不用。仍 403 时请在服务器放置 **youtube_cookies.txt**（浏览器导出 Netscape）。
 - 下载超时：默认 `socket_timeout=90`（yt-dlp 原默认 20）。可用 `YTDLP_SOCKET_TIMEOUT`、`YTDLP_RETRIES`、`YTDLP_FRAGMENT_RETRIES`、`YTDLP_CONCURRENT_FRAGMENTS` 覆盖。
 - 断点续跑：`--from-step 2` 需已有 `yt_<ID>.mp4`（或 mkv/webm）与英文字幕 VTT；`3` 另需 `yt_<ID>.zh-Hans.vtt`；`4` 需已有 `yt_<ID>_bilingual.mp4`。仍会请求同一 URL 以解析视频 ID 与标题（不重复下载视频）。
 """
@@ -91,12 +91,19 @@ def _find_project_root_youtube_cookies() -> Path | None:
     return None
 
 
-def _youtube_extractor_args() -> dict | None:
-    """缓解 YouTube 403 / SABR；默认 android_vr（通常不需 GVS PO Token）。YTDLP_YOUTUBE_PLAYER_CLIENT=none 关闭。"""
-    raw = (os.environ.get("YTDLP_YOUTUBE_PLAYER_CLIENT") or "android_vr").strip().lower()
+_DEFAULT_YOUTUBE_PLAYER_CLIENTS = "tv,web_safari,android_vr"
+
+
+def _youtube_player_clients() -> list[str]:
+    raw = (os.environ.get("YTDLP_YOUTUBE_PLAYER_CLIENT") or _DEFAULT_YOUTUBE_PLAYER_CLIENTS).strip().lower()
     if raw in ("none", "off", "0", "false", "no"):
-        return None
-    clients = [x.strip() for x in raw.replace(";", ",").split(",") if x.strip()]
+        return []
+    return [x.strip() for x in raw.replace(";", ",").split(",") if x.strip()]
+
+
+def _youtube_extractor_args(*, player_clients: list[str] | None = None) -> dict | None:
+    """缓解 YouTube 403 / SABR / PO Token；默认 tv,web_safari,android_vr 按序回退。"""
+    clients = player_clients if player_clients is not None else _youtube_player_clients()
     if not clients:
         return None
     return {"youtube": {"player_client": clients}}
@@ -255,9 +262,9 @@ def _is_unavailable_format_error(e: BaseException) -> bool:
 def _raise_no_1080_stream(err: BaseException) -> None:
     raise RuntimeError(
         "未找到 1080p 视频流，已按要求停止（不下载更低清晰度）。"
-        "请尝试：更新 yt-dlp；若日志出现 PO Token / GVS：默认已用 android_vr，也可试 "
-        "YTDLP_YOUTUBE_PLAYER_CLIENT=tv 或按 https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide 配置；"
-        "并放置 youtube_cookies.txt。"
+        "请尝试：更新 yt-dlp；若日志出现 PO Token / GVS：可试 "
+        "YTDLP_YOUTUBE_PLAYER_CLIENT=tv,web_safari 或按 https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide 配置；"
+        "并放置 youtube_cookies.txt（若仍无 1080p 可试 --no-youtube-cookies）。"
     ) from err
 
 
@@ -373,18 +380,26 @@ def download_youtube(
     }
     if (os.environ.get("YTDLP_FORCE_IPV4", "1").strip().lower() not in ("0", "false", "no")):
         base_opts["force_ipv4"] = True
-    ex_args = _youtube_extractor_args()
-    if ex_args:
-        base_opts["extractor_args"] = ex_args
-        pc = ex_args.get("youtube", {}).get("player_client", [])
-        print(f"  YouTube player_client: {pc}（可用 YTDLP_YOUTUBE_PLAYER_CLIENT 覆盖，none=关闭）")
     js_rt = _js_runtimes_from_env()
     if js_rt:
         base_opts["js_runtimes"] = js_rt
         print(f"  使用 JS 运行环境: {list(js_rt.keys())}（来自环境变量 YTDLP_DENO_PATH / YTDLP_NODE_PATH）")
 
-    def _extract(with_cookie: bool):
+    client_chains: list[tuple[str, list[str]]] = []
+    primary = _youtube_player_clients()
+    if primary:
+        client_chains.append(("默认", primary))
+    fallback = [c for c in ("tv", "web_safari") if c not in primary]
+    if fallback:
+        client_chains.append(("回退", fallback))
+
+    def _extract(with_cookie: bool, clients: list[str], label: str):
         opts = {**base_opts}
+        ex_args = _youtube_extractor_args(player_clients=clients)
+        if ex_args:
+            opts["extractor_args"] = ex_args
+            pc = ex_args.get("youtube", {}).get("player_client", [])
+            print(f"  YouTube player_client ({label}): {pc}")
         if with_cookie and cookie_path:
             p = Path(cookie_path).expanduser().resolve()
             if not p.is_file():
@@ -394,37 +409,42 @@ def download_youtube(
         with yt_dlp.YoutubeDL(opts) as ydl:
             return ydl.extract_info(url, download=True)
 
-    if cookie_path:
-        p = Path(cookie_path).expanduser().resolve()
-        if not p.is_file():
-            raise FileNotFoundError(f"找不到 YouTube cookies 文件: {p}")
-        try:
-            info = _extract(True)
-        except DownloadError as e:
-            msg = str(e)
-            if "Only images are available" in msg or _is_unavailable_format_error(e):
-                print(
-                    "  提示：使用 cookies 时未能解析出可用视频流（常见于 YouTube 验证未通过、"
-                    "本机未配置 JS 运行环境，见 https://github.com/yt-dlp/yt-dlp/wiki/EJS ）。"
-                    "将不使用 cookies 重试下载…"
-                )
-                try:
-                    info = _extract(False)
-                except DownloadError as e2:
-                    if _is_unavailable_format_error(e2):
-                        _raise_no_1080_stream(e2)
+    info = None
+    last_err: BaseException | None = None
+    cookie_attempts = [True, False] if cookie_path else [False]
+    for chain_label, clients in client_chains:
+        for with_cookie in cookie_attempts:
+            if with_cookie:
+                p = Path(cookie_path).expanduser().resolve()
+                if not p.is_file():
+                    raise FileNotFoundError(f"找不到 YouTube cookies 文件: {p}")
+            try:
+                info = _extract(with_cookie, clients, chain_label)
+                break
+            except DownloadError as e:
+                last_err = e
+                msg = str(e)
+                if not (_is_unavailable_format_error(e) or "po token" in msg.lower()):
                     raise
-            else:
-                raise
-    else:
-        try:
-            info = _extract(False)
-        except DownloadError as e:
-            if _is_unavailable_format_error(e):
-                _raise_no_1080_stream(e)
-            raise
+                if with_cookie and cookie_path:
+                    print(
+                        "  提示：当前 player_client + cookies 未能解析出 1080p（常见于 PO Token / "
+                        "YouTube 验证未通过，见 https://github.com/yt-dlp/yt-dlp/wiki/EJS ）。"
+                        "将去掉 cookies 重试…"
+                    )
+                    continue
+                print(
+                    f"  提示：player_client {clients} 未能解析出 1080p，"
+                    "将尝试下一组客户端…"
+                )
+        if info:
+            break
 
     if not info:
+        if last_err and _is_unavailable_format_error(last_err):
+            _raise_no_1080_stream(last_err)
+        if last_err:
+            raise last_err
         raise RuntimeError("yt-dlp 未返回视频信息")
     vid = str(info.get("id") or "")
     if not vid:
