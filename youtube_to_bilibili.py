@@ -259,6 +259,18 @@ def _is_unavailable_format_error(e: BaseException) -> bool:
     )
 
 
+def _is_retriable_youtube_download_error(e: BaseException) -> bool:
+    """可换 player_client / 去掉 cookies 后重试的错误。"""
+    msg = str(e).lower()
+    return (
+        _is_unavailable_format_error(e)
+        or "po token" in msg
+        or "page needs to be reloaded" in msg
+        or "unplayable" in msg
+        or "http error 403" in msg
+    )
+
+
 def _raise_no_1080_stream(err: BaseException) -> None:
     raise RuntimeError(
         "未找到 1080p 视频流，已按要求停止（不下载更低清晰度）。"
@@ -385,13 +397,16 @@ def download_youtube(
         base_opts["js_runtimes"] = js_rt
         print(f"  使用 JS 运行环境: {list(js_rt.keys())}（来自环境变量 YTDLP_DENO_PATH / YTDLP_NODE_PATH）")
 
-    client_chains: list[tuple[str, list[str]]] = []
-    primary = _youtube_player_clients()
-    if primary:
-        client_chains.append(("默认", primary))
-    fallback = [c for c in ("tv", "web_safari") if c not in primary]
-    if fallback:
-        client_chains.append(("回退", fallback))
+    client_chains: list[tuple[str, list[str], bool]] = []
+    env_clients = _youtube_player_clients()
+    # 匿名优先：cookies + tv 常触发 tv_downgraded → "page needs to be reloaded"
+    client_chains.append(("匿名", env_clients or ["tv", "web_safari", "android_vr"], False))
+    if cookie_path:
+        cookie_clients = ["web_safari", "web_embedded", "-tv_downgraded"]
+        client_chains.append(("cookies（禁用 tv_downgraded）", cookie_clients, True))
+        if env_clients:
+            client_chains.append(("cookies", env_clients, True))
+    client_chains.append(("匿名 android_vr", ["android_vr"], False))
 
     def _extract(with_cookie: bool, clients: list[str], label: str):
         opts = {**base_opts}
@@ -411,34 +426,17 @@ def download_youtube(
 
     info = None
     last_err: BaseException | None = None
-    cookie_attempts = [True, False] if cookie_path else [False]
-    for chain_label, clients in client_chains:
-        for with_cookie in cookie_attempts:
-            if with_cookie:
-                p = Path(cookie_path).expanduser().resolve()
-                if not p.is_file():
-                    raise FileNotFoundError(f"找不到 YouTube cookies 文件: {p}")
-            try:
-                info = _extract(with_cookie, clients, chain_label)
-                break
-            except DownloadError as e:
-                last_err = e
-                msg = str(e)
-                if not (_is_unavailable_format_error(e) or "po token" in msg.lower()):
-                    raise
-                if with_cookie and cookie_path:
-                    print(
-                        "  提示：当前 player_client + cookies 未能解析出 1080p（常见于 PO Token / "
-                        "YouTube 验证未通过，见 https://github.com/yt-dlp/yt-dlp/wiki/EJS ）。"
-                        "将去掉 cookies 重试…"
-                    )
-                    continue
-                print(
-                    f"  提示：player_client {clients} 未能解析出 1080p，"
-                    "将尝试下一组客户端…"
-                )
-        if info:
+    for chain_label, clients, use_cookie in client_chains:
+        if use_cookie and not cookie_path:
+            continue
+        try:
+            info = _extract(use_cookie, clients, chain_label)
             break
+        except DownloadError as e:
+            last_err = e
+            if not _is_retriable_youtube_download_error(e):
+                raise
+            print(f"  提示：{chain_label} 下载失败（{e}），尝试下一策略…")
 
     if not info:
         if last_err and _is_unavailable_format_error(last_err):
