@@ -177,6 +177,9 @@ def _get_ydl_opts():
         "subtitleslangs": ["en"],
         "subtitlesformat": "vtt",
         "embed_subs": True,
+        "socket_timeout": 90,
+        "retries": 20,
+        "fragment_retries": 20,
     }
 
 

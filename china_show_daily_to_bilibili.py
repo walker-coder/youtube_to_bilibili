@@ -43,14 +43,14 @@ def daily_success_log_path(d: date | None = None) -> Path:
     return LOGS_DIR / f"{DAILY_LOG_PREFIX}{day.strftime('%Y%m%d')}{DAILY_LOG_SUFFIX}"
 
 
-def already_ran_daily_success() -> bool:
+def already_ran_daily_success(d: date | None = None) -> bool:
     ensure_logs_dir()
-    return daily_success_log_path().exists()
+    return daily_success_log_path(d).exists()
 
 
-def _write_daily_success_log(note: str = "") -> None:
+def _write_daily_success_log(note: str = "", d: date | None = None) -> None:
     ensure_logs_dir()
-    p = daily_success_log_path()
+    p = daily_success_log_path(d)
     line = f"completed_at={datetime.now().isoformat(timespec='seconds')}"
     if note:
         line += f" {note}"
@@ -125,15 +125,15 @@ def main() -> None:
                 f"--search-keyword-date 需为 YYYY-MM-DD，收到: {args.search_keyword_date!r}"
             )
 
-    if not args.no_daily_log and not args.force and already_ran_daily_success():
-        p = daily_success_log_path()
+    filter_day = search_keyword_day if search_keyword_day is not None else date.today()
+    if not args.no_daily_log and not args.force and already_ran_daily_success(filter_day):
+        p = daily_success_log_path(filter_day)
         print(
-            f"今日 china_show_daily 已有标记（存在 {p}），跳过。"
+            f"china_show_daily 已有标记（存在 {p}），跳过。"
             " 若仍需跑请用 --force 或删除该文件。"
         )
         sys.exit(0)
 
-    filter_day = search_keyword_day if search_keyword_day is not None else date.today()
     dates = [filter_day.strftime("%Y%m%d")]
 
     entries = fetch_china_show_entries(
@@ -194,10 +194,12 @@ def main() -> None:
             )
         sys.exit(0)
 
+    wrote_lock = False
     if not args.no_daily_log:
         vids = ",".join(vid for vid, _, _ in pending)
-        _write_daily_success_log(note=f"video_ids={vids}")
-        print(f"已写入当日完成标记: {daily_success_log_path()}")
+        _write_daily_success_log(note=f"video_ids={vids}", d=filter_day)
+        wrote_lock = True
+        print(f"已写入完成标记: {daily_success_log_path(filter_day)}")
 
     old_int = signal.signal(signal.SIGINT, signal.SIG_DFL)
     old_term = (
@@ -205,6 +207,7 @@ def main() -> None:
         if hasattr(signal, "SIGTERM")
         else None
     )
+    ok = 0
     try:
         for vid, url, e in pending:
             title = e.get("title") or ""
@@ -219,6 +222,7 @@ def main() -> None:
                     no_review_wait=args.no_review_wait,
                     from_step=1,
                 )
+                ok += 1
             except Exception as ex:
                 print(f"错误: {vid} 流水线失败: {ex}", file=sys.stderr)
                 continue
@@ -226,6 +230,14 @@ def main() -> None:
         signal.signal(signal.SIGINT, old_int)
         if old_term is not None:
             signal.signal(signal.SIGTERM, old_term)
+
+    if wrote_lock and ok == 0:
+        p = daily_success_log_path(filter_day)
+        try:
+            p.unlink(missing_ok=True)
+            print(f"流水线全部失败，已删除完成标记 {p}，可直接重跑（不必 --force）。")
+        except OSError as ex:
+            print(f"流水线全部失败，但未能删除完成标记 {p}: {ex}", file=sys.stderr)
 
 
 if __name__ == "__main__":

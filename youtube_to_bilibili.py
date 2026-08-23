@@ -24,6 +24,7 @@
 - 若使用 cookies 后出现「Requested format is not available」：cookie 已生效，但带登录态时需通过 YouTube 验证，本机须安装 Deno/Node 等（见 https://github.com/yt-dlp/yt-dlp/wiki/EJS ）。脚本会先带 cookie 下载，失败则自动去掉 cookie 重试。可选环境变量：YTDLP_DENO_PATH / YTDLP_NODE_PATH 指向 deno.exe、node.exe（未加入 PATH 时）。
 - 云服务器常见 IPv6 不通导致连接失败：默认启用 yt-dlp 的 force_ipv4（等同 --force-ipv4）。若需走 IPv6，设置环境变量 YTDLP_FORCE_IPV4=0。
 - 机房 IP / 新版 YouTube：默认 `player_client=android_vr`（多数环境下不要求 GVS PO Token；旧版 `android` 常需 PO Token，见 yt-dlp PO-Token-Guide）。可用环境变量 `YTDLP_YOUTUBE_PLAYER_CLIENT` 覆盖（如 `android,web`）；设为 `none` 则不用。仍 403 时请在服务器放置 **youtube_cookies.txt**（浏览器导出 Netscape）。
+- 下载超时：默认 `socket_timeout=90`（yt-dlp 原默认 20）。可用 `YTDLP_SOCKET_TIMEOUT`、`YTDLP_RETRIES`、`YTDLP_FRAGMENT_RETRIES`、`YTDLP_CONCURRENT_FRAGMENTS` 覆盖。
 - 断点续跑：`--from-step 2` 需已有 `yt_<ID>.mp4`（或 mkv/webm）与英文字幕 VTT；`3` 另需 `yt_<ID>.zh-Hans.vtt`；`4` 需已有 `yt_<ID>_bilingual.mp4`。仍会请求同一 URL 以解析视频 ID 与标题（不重复下载视频）。
 """
 
@@ -99,6 +100,22 @@ def _youtube_extractor_args() -> dict | None:
     if not clients:
         return None
     return {"youtube": {"player_client": clients}}
+
+
+def _ytdlp_network_opts() -> dict:
+    """云服务器访问 YouTube 时默认 20s 读超时容易失败；可用环境变量加长。"""
+    timeout = float((os.environ.get("YTDLP_SOCKET_TIMEOUT") or "90").strip() or "90")
+    retries = int((os.environ.get("YTDLP_RETRIES") or "20").strip() or "20")
+    fragments = int((os.environ.get("YTDLP_FRAGMENT_RETRIES") or "20").strip() or "20")
+    concurrent = int((os.environ.get("YTDLP_CONCURRENT_FRAGMENTS") or "4").strip() or "4")
+    return {
+        "socket_timeout": timeout,
+        "retries": retries,
+        "fragment_retries": fragments,
+        "extractor_retries": 5,
+        "file_access_retries": 8,
+        "concurrent_fragment_downloads": max(1, concurrent),
+    }
 
 
 def _js_runtimes_from_env() -> dict | None:
@@ -352,7 +369,7 @@ def download_youtube(
         "subtitleslangs": ["en"],
         "subtitlesformat": "vtt",
         "embed_subs": False,
-        "concurrent_fragment_downloads": 8,
+        **_ytdlp_network_opts(),
     }
     if (os.environ.get("YTDLP_FORCE_IPV4", "1").strip().lower() not in ("0", "false", "no")):
         base_opts["force_ipv4"] = True
@@ -434,6 +451,7 @@ def _youtube_extract_info_no_download(
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
+        **_ytdlp_network_opts(),
     }
     if (os.environ.get("YTDLP_FORCE_IPV4", "1").strip().lower() not in ("0", "false", "no")):
         base_opts["force_ipv4"] = True
