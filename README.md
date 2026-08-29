@@ -8,11 +8,11 @@
 - [ffmpeg](https://ffmpeg.org/) 已加入系统 `PATH`
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp)（随 `requirements.txt` 安装）
 
-可选：若使用 YouTube 登录 cookies 下载时仍提示需 JS 验证，请安装 [Deno](https://deno.land/) 或 Node，并执行 `pip install -U "yt-dlp[default]"`（含 **yt-dlp-ejs** JS challenge 求解器）。或设置环境变量 `YTDLP_DENO_PATH` / `YTDLP_NODE_PATH` 指向可执行文件（见 [yt-dlp EJS 说明](https://github.com/yt-dlp/yt-dlp/wiki/EJS)）。脚本默认 `YTDLP_REMOTE_COMPONENTS=ejs:github` 作为兜底。
+可选：若使用 YouTube 登录 cookies 下载时仍提示需 JS 验证，请安装 [Deno](https://deno.land/) 或 Node，并执行 `pip install -U "yt-dlp[default]"`（含 **yt-dlp-ejs** JS challenge 求解器）。或设置环境变量 `YTDLP_DENO_PATH` / `YTDLP_NODE_PATH` 指向可执行文件（见 [yt-dlp EJS 说明](https://github.com/yt-dlp/yt-dlp/wiki/EJS)）。脚本默认 `YTDLP_REMOTE_COMPONENTS=ejs:github,ejs:npm` 作为兜底。
 
 云服务器若 **IPv6 不通**（`curl -6` 失败），下载默认启用 **仅 IPv4**（等同 `yt-dlp --force-ipv4`，环境变量 `YTDLP_FORCE_IPV4` 默认为 `1`）。若必须走 IPv6，设置 `YTDLP_FORCE_IPV4=0`。
 
-若下载失败且日志出现 **PO Token / GVS**：本仓库默认 **`YTDLP_YOUTUBE_PLAYER_CLIENT=tv,web_safari,android_vr`**（按序回退）。仍失败时可单独试 `tv` 或见 [yt-dlp PO Token 说明](https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide)。若仍 **HTTP 403**，请在服务器放置 **youtube_cookies.txt**。并执行 `yt-dlp -U` 保持最新。
+若下载失败且日志出现 **n challenge / Only images are available**：需要 Deno 或 Node≥22 解 YouTube JS 挑战（cron 请设 `YTDLP_DENO_PATH=/root/.deno/bin/deno`），并 `pip install -U "yt-dlp[default]"`。默认 **`player_client=web_safari,web_embedded`**。若仍 **HTTP 403**，请在服务器放置 **youtube_cookies.txt**。并执行 `yt-dlp -U` 保持最新。见 [yt-dlp EJS](https://github.com/yt-dlp/yt-dlp/wiki/EJS)。
 
 ## 安装
 
@@ -85,7 +85,7 @@ chmod +x run_youtube_to_bilibili_bg.sh
 ./run_youtube_to_bilibili_bg.sh JOU5iy56FjY --no-upload
 ```
 
-其余参数（如 `--title`、`--no-review-wait`）写在视频 ID 之后即可。脚本默认使用 **`python3.11`**；若要改用其它解释器，可先执行 `export PYTHON=python3`（或指向虚拟环境里 `python`）。脚本内默认 **`export YTDLP_YOUTUBE_PLAYER_CLIENT=tv,web_safari,android_vr`**（若已在环境变量里设置过则不会覆盖）。查看进度：`tail -f logs/youtube_to_bilibili_<视频ID>_*.log`（具体文件名以脚本输出为准）。
+其余参数（如 `--title`、`--no-review-wait`）写在视频 ID 之后即可。脚本默认使用 **`python3.11`**；若要改用其它解释器，可先执行 `export PYTHON=python3`（或指向虚拟环境里 `python`）。脚本内默认 **`export YTDLP_YOUTUBE_PLAYER_CLIENT=web_safari,web_embedded`**（若已在环境变量里设置过则不会覆盖）。查看进度：`tail -f logs/youtube_to_bilibili_<视频ID>_*.log`（具体文件名以脚本输出为准）。
 
 ### 从中间步骤继续
 

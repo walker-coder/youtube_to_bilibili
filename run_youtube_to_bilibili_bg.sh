@@ -6,7 +6,7 @@
 #   ./run_youtube_to_bilibili_bg.sh JOU5iy56FjY --no-upload
 # 日志在 logs/ 目录（含步骤 3 烧录进度与中断记录，均写入下方 LOG）；进程为 nohup 后台任务，断开 SSH 后仍继续跑。
 # 默认使用 python3.11；可通过环境变量 PYTHON 覆盖，例如：PYTHON=python3 ./run_youtube_to_bilibili_bg.sh ...
-# 默认 YTDLP_YOUTUBE_PLAYER_CLIENT=tv,web_safari,android_vr（按序回退，避免 android_vr 缺 PO Token）；若已在外部 export 则沿用。
+# 默认 YTDLP_YOUTUBE_PLAYER_CLIENT=web_safari,web_embedded（HLS 1080p，避免 tv_downgraded / android_vr GVS）；若已在外部 export 则沿用。
 # 默认 BLOOMBREG_FFMPEG_BURN_ARGS=-threads 1（烧录字幕时降低 ffmpeg 并行与峰值内存，小内存 VPS 适用）；
 #   覆盖示例：BLOOMBREG_FFMPEG_BURN_ARGS='-threads 2' ./run_youtube_to_bilibili_bg.sh ...
 # 默认 BLOOMBREG_ASS_FONTNAME=Noto Sans CJK SC（Linux 烧录中文；Windows 可在外部 export 为 Microsoft YaHei）；
@@ -34,7 +34,10 @@ LOG="${LOG_DIR}/youtube_to_bilibili_${VID}_${STAMP}.log"
 
 PYTHON="${PYTHON:-python3.11}"
 export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
-export YTDLP_YOUTUBE_PLAYER_CLIENT="${YTDLP_YOUTUBE_PLAYER_CLIENT:-tv,web_safari,android_vr}"
+export YTDLP_YOUTUBE_PLAYER_CLIENT="${YTDLP_YOUTUBE_PLAYER_CLIENT:-web_safari,web_embedded}"
+if [[ -z "${YTDLP_DENO_PATH:-}" && -x "${HOME}/.deno/bin/deno" ]]; then
+  export YTDLP_DENO_PATH="${HOME}/.deno/bin/deno"
+fi
 export BLOOMBREG_FFMPEG_BURN_ARGS="${BLOOMBREG_FFMPEG_BURN_ARGS:--threads 1}"
 export BLOOMBREG_ASS_FONTNAME="${BLOOMBREG_ASS_FONTNAME:-Noto Sans CJK SC}"
 cd "$ROOT"

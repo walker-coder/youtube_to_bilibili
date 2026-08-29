@@ -21,9 +21,9 @@
 - 上传成功后会轮询创作中心审核：若「已退回」且稿件问题中含【HH:MM:SS-HH:MM:SS】，则剪除对应片段并替换稿件后结束（不再轮询）。可用 --no-review-wait 关闭。环境变量见 bilibili_review.py。
 - 仅当**已上传且 B 站审核通过**后，流水线最后一步才会清理 **video_subs/** 下当前视频在本次流程产生的文件（下载的 mp4、vtt、srt、双语成片、recut 等）；其它视频 ID 的文件不受影响。若中途报错、审核失败、使用 `--no-upload` 或 `--no-review-wait`，则不会自动删除文件。
 - 若链接含 &list=（播放列表），脚本已默认 noplaylist，只处理当前 watch?v= 视频；也可手动改成仅 https://www.youtube.com/watch?v=视频ID 。
-- 若使用 cookies 后出现「Requested format is not available」：cookie 已生效，但带登录态时需通过 YouTube 验证，本机须安装 Deno/Node 等（见 https://github.com/yt-dlp/yt-dlp/wiki/EJS ），并安装 `yt-dlp[default]`（含 yt-dlp-ejs）。脚本默认启用 `remote_components=ejs:github` 作为兜底。可选环境变量：YTDLP_DENO_PATH / YTDLP_NODE_PATH 指向 deno.exe、node.exe（未加入 PATH 时）。
+- 若出现 n challenge / Only images are available：YouTube 需要 JS 运行时解 n-challenge。脚本会自动查找 Deno/Node（含 `~/.deno/bin`，避免 cron 没有 PATH）。也可设 YTDLP_DENO_PATH / YTDLP_NODE_PATH。并安装 `yt-dlp[default]`（含 yt-dlp-ejs）。见 https://github.com/yt-dlp/yt-dlp/wiki/EJS
 - 云服务器常见 IPv6 不通导致连接失败：默认启用 yt-dlp 的 force_ipv4（等同 --force-ipv4）。若需走 IPv6，设置环境变量 YTDLP_FORCE_IPV4=0。
-- 机房 IP / 新版 YouTube：默认 `player_client=tv,web_safari,android_vr`（按序回退；`android_vr` 在部分环境需 GVS PO Token）。可用 `YTDLP_YOUTUBE_PLAYER_CLIENT` 覆盖（如 `tv`）；设为 `none` 则不用。仍 403 时请在服务器放置 **youtube_cookies.txt**（浏览器导出 Netscape）。
+- 机房 IP / 新版 YouTube：默认 `player_client=web_safari,web_embedded`（`web_safari` 的 HLS 1080p 暂不需 PO Token）。带 cookies 时会附加 `-tv_downgraded`（否则 `tv_downgraded` 常 UNPLAYABLE）。可用 `YTDLP_YOUTUBE_PLAYER_CLIENT` 覆盖；设为 `none` 则用 yt-dlp 默认客户端。仍 403 时请放置 **youtube_cookies.txt**。
 - 下载超时：默认 `socket_timeout=90`（yt-dlp 原默认 20）。可用 `YTDLP_SOCKET_TIMEOUT`、`YTDLP_RETRIES`、`YTDLP_FRAGMENT_RETRIES`、`YTDLP_CONCURRENT_FRAGMENTS` 覆盖。
 - 断点续跑：`--from-step 2` 需已有 `yt_<ID>.mp4`（或 mkv/webm）与英文字幕 VTT；`3` 另需 `yt_<ID>.zh-Hans.vtt`；`4` 需已有 `yt_<ID>_bilingual.mp4`。仍会请求同一 URL 以解析视频 ID 与标题（不重复下载视频）。
 """
@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -48,8 +49,12 @@ from upload_bilibili import upload_video_to_bilibili
 from vtt_to_srt import maybe_lowercase_en_vtt_if_mostly_upper, vtt_to_srt
 # from zh_sensitive_replace import apply_zh_sensitive_replacements_to_vtt
 
-# 仅 1080p：DASH 合并（最佳 1080p 视频轨 + 最佳音频）或极少数单文件 1080p；无匹配则 yt-dlp 失败。
-YOUTUBE_FORMAT_1080P_ONLY = "bestvideo[height=1080]+bestaudio/best[height=1080]"
+# 仅 1080p：DASH 分轨，或 web_safari HLS 单文件（format 96）；无匹配则 yt-dlp 失败。
+YOUTUBE_FORMAT_1080P_ONLY = (
+    "bestvideo[height=1080]+bestaudio/"
+    "best[height=1080]/"
+    "best[height=1080][protocol^=m3u8]"
+)
 
 # 供 SIGINT/SIGTERM 时终止子进程（如 bilingual_subs_to_video）
 _pipeline_child: subprocess.Popen | None = None
@@ -91,7 +96,10 @@ def _find_project_root_youtube_cookies() -> Path | None:
     return None
 
 
-_DEFAULT_YOUTUBE_PLAYER_CLIENTS = "tv,web_safari,android_vr"
+# web_safari：HLS 1080p（format 96）暂不需 GVS PO Token，但必须能解 n-challenge。
+# 不要默认 tv：无 cookies 时格式常 DRM；有 cookies 时会变成 tv_downgraded（UNPLAYABLE）。
+# 不要默认 android_vr：现网常要 GVS PO Token，1080p 会被跳过。
+_DEFAULT_YOUTUBE_PLAYER_CLIENTS = "web_safari,web_embedded"
 
 
 def _youtube_player_clients() -> list[str]:
@@ -102,7 +110,7 @@ def _youtube_player_clients() -> list[str]:
 
 
 def _youtube_extractor_args(*, player_clients: list[str] | None = None) -> dict | None:
-    """缓解 YouTube 403 / SABR / PO Token；默认 tv,web_safari,android_vr 按序回退。"""
+    """缓解 YouTube 403 / SABR / PO Token；默认 web_safari,web_embedded。"""
     clients = player_clients if player_clients is not None else _youtube_player_clients()
     if not clients:
         return None
@@ -126,8 +134,8 @@ def _ytdlp_network_opts() -> dict:
 
 
 def _ytdlp_ejs_opts() -> dict:
-    """YouTube JS challenge 需 yt-dlp-ejs 或允许拉取远程组件；默认可从 GitHub 获取。"""
-    raw = (os.environ.get("YTDLP_REMOTE_COMPONENTS") or "ejs:github").strip()
+    """YouTube JS challenge 需 yt-dlp-ejs 或允许拉取远程组件；默认可从 GitHub / npm 获取。"""
+    raw = (os.environ.get("YTDLP_REMOTE_COMPONENTS") or "ejs:github,ejs:npm").strip()
     if raw.lower() in ("none", "off", "0", "false", "no"):
         return {}
     components = [x.strip() for x in raw.replace(";", ",").split(",") if x.strip()]
@@ -136,13 +144,81 @@ def _ytdlp_ejs_opts() -> dict:
     return {"remote_components": set(components)}
 
 
+def _executable_if_exists(p: Path | str | None) -> str | None:
+    if not p:
+        return None
+    path = Path(str(p)).expanduser()
+    if not path.is_file():
+        return None
+    if os.name != "nt" and not os.access(path, os.X_OK):
+        return None
+    return str(path.resolve())
+
+
+def _find_deno_executable() -> str | None:
+    env = (os.environ.get("YTDLP_DENO_PATH") or os.environ.get("YTDLP_JS_RUNTIME_PATH") or "").strip()
+    if env:
+        found = _executable_if_exists(env) or shutil.which(env)
+        if found:
+            return found
+    which = shutil.which("deno")
+    if which:
+        return which
+    home = Path.home()
+    deno_install = (os.environ.get("DENO_INSTALL") or "").strip()
+    cands: list[Path] = []
+    if deno_install:
+        cands.append(Path(deno_install) / "bin" / "deno")
+        cands.append(Path(deno_install) / "bin" / "deno.exe")
+    cands.extend(
+        [
+            home / ".deno" / "bin" / "deno",
+            home / ".deno" / "bin" / "deno.exe",
+            Path("/root/.deno/bin/deno"),
+            Path("/usr/local/bin/deno"),
+            Path("/usr/bin/deno"),
+            Path("/opt/deno/bin/deno"),
+        ]
+    )
+    for c in cands:
+        found = _executable_if_exists(c)
+        if found:
+            return found
+    return None
+
+
+def _find_node_executable() -> str | None:
+    env = (os.environ.get("YTDLP_NODE_PATH") or "").strip()
+    if env:
+        found = _executable_if_exists(env) or shutil.which(env)
+        if found:
+            return found
+    which = shutil.which("node")
+    if which:
+        return which
+    nvm_root = Path.home() / ".nvm" / "versions" / "node"
+    if nvm_root.is_dir():
+        for n in sorted(nvm_root.glob("*/bin/node"), reverse=True):
+            found = _executable_if_exists(n)
+            if found:
+                return found
+    for c in (Path("/usr/local/bin/node"), Path("/usr/bin/node")):
+        found = _executable_if_exists(c)
+        if found:
+            return found
+    return None
+
+
 def _js_runtimes_from_env() -> dict | None:
-    """若设置 YTDLP_DENO_PATH 或 YTDLP_NODE_PATH，显式指定可执行文件路径（未在 PATH 时）。"""
+    """定位 Deno/Node：环境变量 → PATH → 常见安装路径（cron 常没有 ~/.deno/bin）。
+
+    yt-dlp 默认只启用 Deno；Node 找到后必须写入 js_runtimes 才会用。
+    """
     out: dict = {}
-    deno = (os.environ.get("YTDLP_DENO_PATH") or os.environ.get("YTDLP_JS_RUNTIME_PATH") or "").strip()
+    deno = _find_deno_executable()
     if deno:
         out["deno"] = {"path": deno}
-    node = (os.environ.get("YTDLP_NODE_PATH") or "").strip()
+    node = _find_node_executable()
     if node:
         out["node"] = {"path": node}
     return out if out else None
@@ -303,9 +379,9 @@ def _is_retriable_youtube_download_error(e: BaseException) -> bool:
 def _raise_no_1080_stream(err: BaseException) -> None:
     raise RuntimeError(
         "未找到 1080p 视频流，已按要求停止（不下载更低清晰度）。"
-        "请尝试：更新 yt-dlp；若日志出现 PO Token / GVS：可试 "
-        "YTDLP_YOUTUBE_PLAYER_CLIENT=tv,web_safari 或按 https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide 配置；"
-        "并放置 youtube_cookies.txt（若仍无 1080p 可试 --no-youtube-cookies）。"
+        "若日志有 n challenge / Only images are available：未找到可用的 Deno/Node，"
+        "请安装 Deno 或 Node≥22，cron 设置 YTDLP_DENO_PATH（如 /root/.deno/bin/deno），"
+        "并 pip install -U \"yt-dlp[default]\"。见 https://github.com/yt-dlp/yt-dlp/wiki/EJS"
     ) from err
 
 
@@ -422,17 +498,42 @@ def download_youtube(
     js_rt = _js_runtimes_from_env()
     if js_rt:
         shared_opts["js_runtimes"] = js_rt
-        print(f"  使用 JS 运行环境: {list(js_rt.keys())}（来自环境变量 YTDLP_DENO_PATH / YTDLP_NODE_PATH）")
+        shown = ", ".join(f"{k}={v.get('path') or 'PATH'}" for k, v in js_rt.items())
+        print(f"  JS 运行环境: {shown}")
+    else:
+        print(
+            "  警告：未找到 Deno/Node。web_safari 无法解 n-challenge，往往只剩图片格式。"
+            "请安装 Deno 或 Node≥22，或设置 YTDLP_DENO_PATH（cron 常见路径 /root/.deno/bin/deno）。",
+            file=sys.stderr,
+        )
+
+    def _no_tv_downgraded(clients: list[str]) -> list[str]:
+        out = list(clients)
+        if "-tv_downgraded" not in out:
+            out.append("-tv_downgraded")
+        return out
 
     client_chains: list[tuple[str, list[str], bool]] = []
     env_clients = _youtube_player_clients()
     if cookie_path:
-        cookie_clients = ["web_safari", "web_embedded", "-tv_downgraded"]
-        client_chains.append(("cookies（禁用 tv_downgraded）", cookie_clients, True))
+        # cookies 会自动附加 tv_downgraded（常 UNPLAYABLE / 无 1080p），必须显式关掉
+        client_chains.append(
+            (
+                "cookies web_safari（禁用 tv_downgraded）",
+                ["web_safari", "web_embedded", "-tv_downgraded"],
+                True,
+            )
+        )
+        client_chains.append(
+            ("cookies default+web_embedded", ["default", "web_embedded"], True)
+        )
         if env_clients:
-            client_chains.append(("cookies", env_clients, True))
-    client_chains.append(("匿名", env_clients or ["tv", "web_safari", "android_vr"], False))
-    client_chains.append(("匿名 android_vr", ["android_vr"], False))
+            client_chains.append(("cookies", _no_tv_downgraded(env_clients), True))
+    # 匿名 web_safari：HLS 1080p 暂不需 PO Token，但必须能解 n-challenge
+    client_chains.append(("匿名 web_safari", ["web_safari"], False))
+    client_chains.append(("匿名 web_embedded", ["web_embedded"], False))
+    client_chains.append(("匿名", env_clients or ["web_safari", "web_embedded"], False))
+    client_chains.append(("匿名 默认客户端", [], False))
 
     def _extract(
         with_cookie: bool,
@@ -459,11 +560,13 @@ def download_youtube(
             # 只下 en；不要加 en-orig（常 502 且流水线用不到）
             opts["subtitleslangs"] = ["en"]
         ex_args = _youtube_extractor_args(player_clients=clients)
+        phase = "字幕" if subs_only else "视频"
         if ex_args:
             opts["extractor_args"] = ex_args
             pc = ex_args.get("youtube", {}).get("player_client", [])
-            phase = "字幕" if subs_only else "视频"
             print(f"  YouTube player_client ({label}, {phase}): {pc}")
+        else:
+            print(f"  YouTube player_client ({label}, {phase}): （yt-dlp 默认）")
         if with_cookie and cookie_path:
             p = Path(cookie_path).expanduser().resolve()
             if not p.is_file():
